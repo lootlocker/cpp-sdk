@@ -45,6 +45,10 @@ endif()
 
 add_library(lootlocker_core STATIC
     src/core/version.cpp
+    src/core/result.cpp
+    src/core/config.cpp
+    src/core/config_file.cpp
+    src/core/config_cli.cpp
 )
 add_library(LootLocker::core ALIAS lootlocker_core)
 
@@ -54,6 +58,7 @@ target_include_directories(lootlocker_core
         $<INSTALL_INTERFACE:include>
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party
 )
 target_link_libraries(lootlocker_core PRIVATE lootlocker_compile_options)
 target_compile_definitions(lootlocker_core PRIVATE LOOTLOCKER_BUILDING_LIBRARY)

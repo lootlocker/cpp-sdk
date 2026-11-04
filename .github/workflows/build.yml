@@ -92,3 +92,16 @@ jobs:
             exit 1
           fi
           echo "include/ is clean"
+
+      - name: No public header includes the JSON library
+        run: |
+          set -e
+          # D4: the JSON library lives behind a pimpl. A public header that includes it
+          # would make our parser choice part of the API and undo the pimpl in one line.
+          if grep -rn --include='*.h' --include='*.hpp' \
+               -E '#include[[:space:]]*[<"](nlohmann|rapidjson)' \
+               include/; then
+            echo "::error::A public header includes the JSON library. See D4."
+            exit 1
+          fi
+          echo "no public header includes the JSON library"
