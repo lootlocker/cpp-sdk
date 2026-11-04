@@ -1,0 +1,94 @@
+name: build
+
+# Tier 1 and tier 2 from D14: unit tests and a compile-and-smoke consumer on every
+# target. Tier 3 (the full feature suite against the real API) is a separate workflow and
+# runs on one target only.
+#
+# This workflow is also T3 — the toolchain matrix probe. Its first green run on
+# Windows/MSVC, Linux/GCC and macOS/Clang is the evidence that the C++17 floor (D1)
+# actually compiles on the toolchains we intend to claim.
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    branches: [dev, main]
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows / MSVC
+            os: windows-latest
+            cmake_preset: msvc
+          - name: Linux / GCC
+            os: ubuntu-latest
+            cmake_preset: gcc
+          - name: macOS / Clang
+            os: macos-latest
+            cmake_preset: clang
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Tier 1 — unit tests
+        run: ctest --test-dir build --build-config Release --output-on-failure
+
+      - name: Tier 2 — compile-and-smoke consumer
+        run: cmake --build build --config Release --target lootlocker_consumer_auth
+
+  # T8c: every module compiles on its own, so a module that quietly gains a dependency on
+  # another module fails here rather than at a consumer's link step (D17).
+  module-boundary:
+    name: Module boundary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Each module builds alone
+        run: |
+          set -e
+          for target in lootlocker_core lootlocker_auth lootlocker_broadcasts; do
+            echo "::group::building $target alone"
+            cmake -S . -B "build-$target" -DCMAKE_BUILD_TYPE=Release \
+                  -DLOOTLOCKER_BUILD_TESTS=OFF -DLOOTLOCKER_BUILD_EXAMPLES=OFF
+            cmake --build "build-$target" --target "$target" --parallel
+            echo "::endgroup::"
+          done
+
+  # T8b: nothing under include/ may reach into src/. The include path is the boundary
+  # (D18), so a public header that includes a private one breaks the contract even though
+  # it compiles in-tree.
+  include-boundary:
+    name: Include boundary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: No public header includes a private one
+        run: |
+          set -e
+          # POSIX ERE, so this is the same engine as `git grep -E` and GNU `grep -E`.
+          # Verified to catch a deliberately injected violation before this landed.
+          if grep -rn --include='*.h' --include='*.hpp' \
+               -E '#include[[:space:]]*[<"](lootlocker/)?(core|internal|detail)/' \
+               include/; then
+            echo "::error::A public header includes a private header. See D18."
+            exit 1
+          fi
+          echo "include/ is clean"

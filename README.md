@@ -34,9 +34,6 @@ target_link_libraries(my_game PRIVATE
 
 Only what you name is compiled and linked.
 
-**This is the shape the SDK is being built to, not what is available today.** The repo is
-scaffolding: the targets above do not exist yet. They land with the first feature module.
-
 ## What is in v1
 
 Guest, white label and Steam authentication, plus broadcasts. Presence, offline mode,

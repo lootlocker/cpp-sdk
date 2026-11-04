@@ -1,0 +1,2 @@
+add_executable(example_version version.cpp)
+target_link_libraries(example_version PRIVATE LootLocker::core lootlocker_compile_options)
