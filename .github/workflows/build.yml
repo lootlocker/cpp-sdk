@@ -120,3 +120,22 @@ jobs:
             exit 1
           fi
           echo "no public header includes the JSON library"
+
+  # The timezone table is generated from data/windows-to-iana.tsv (D26). A hand-edited
+  # generated file would drift from its source, so regenerating must produce no diff.
+  generated-files:
+    name: Generated files are current
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Regenerating produces no diff
+        run: |
+          set -e
+          python3 tools/generate_timezone_table.py
+          if ! git diff --quiet; then
+            echo "::error::A generated file is out of date. Run tools/generate_timezone_table.py and commit the result."
+            git --no-pager diff
+            exit 1
+          fi
+          echo "generated files are current"
