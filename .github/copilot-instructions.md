@@ -71,9 +71,6 @@ cmake --build build --parallel
 ctest --test-dir build --output-on-failure
 ```
 
-The layout above is the shape the repo is growing into. On `main` only the scaffolding
-exists — the directories and the test target land with the first feature module on `dev`.
-
 ## Branching
 
 Feature branches come off `dev` and are **rebased** onto it, never merged into it. `main`

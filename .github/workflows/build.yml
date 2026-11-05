@@ -1,0 +1,122 @@
+name: build
+
+# Tier 1 and tier 2 from D14: unit tests and a compile-and-smoke consumer on every
+# target. Tier 3 (the full feature suite against the real API) is a separate workflow and
+# runs on one target only.
+#
+# This workflow is also T3 — the toolchain matrix probe. Its first green run on
+# Windows/MSVC, Linux/GCC and macOS/Clang is the evidence that the C++17 floor (D1)
+# actually compiles on the toolchains we intend to claim.
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    branches: [dev, main]
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows / MSVC
+            os: windows-latest
+          - name: Linux / GCC
+            os: ubuntu-latest
+          - name: macOS / Clang
+            os: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      # Tier 1 and tier 2 together: the unit suites and the consumer smoke test are both
+      # registered with ctest, so this runs the consumer binary rather than only building
+      # it. A compile-only check would pass even if the program crashed on startup.
+      - name: Tier 1 + tier 2 — tests and smoke
+        run: ctest --test-dir build --build-config Release --output-on-failure
+
+  # T8c: every module compiles on its own, so a module that quietly gains a dependency on
+  # another module fails here rather than at a consumer's link step (D17).
+  #
+  # Configuring the whole project and building one target does NOT prove isolation: CMake
+  # resolves the target's link dependencies, so if auth started linking broadcasts,
+  # building auth would build broadcasts too and this job would still pass. Each module is
+  # therefore configured in a project where the other feature targets are never declared.
+  module-boundary:
+    name: Module boundary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Each module builds alone
+        run: |
+          set -e
+          for module in auth broadcasts; do
+            echo "::group::$module, with no other feature module declared"
+            cmake -S . -B "build-$module" -DCMAKE_BUILD_TYPE=Release \
+                  -DLOOTLOCKER_BUILD_TESTS=OFF -DLOOTLOCKER_BUILD_EXAMPLES=OFF \
+                  -DLOOTLOCKER_MODULE_ONLY="$module"
+            cmake --build "build-$module" --target "lootlocker_$module" --parallel
+            echo "::endgroup::"
+          done
+
+      - name: Core builds alone
+        run: |
+          set -e
+          cmake -S . -B build-core -DCMAKE_BUILD_TYPE=Release \
+                -DLOOTLOCKER_BUILD_TESTS=OFF -DLOOTLOCKER_BUILD_EXAMPLES=OFF \
+                -DLOOTLOCKER_MODULE_ONLY=core
+          cmake --build build-core --target lootlocker_core --parallel
+
+  # T8b: nothing under include/ may reach into src/. The include path is the boundary
+  # (D18), so a public header that includes a private one breaks the contract even though
+  # it compiles in-tree.
+  include-boundary:
+    name: Include boundary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: No public header includes a private one
+        run: |
+          set -e
+          # POSIX ERE, so this is the same engine as `git grep -E` and GNU `grep -E`.
+          #
+          # Two shapes are rejected:
+          #   1. a path into a private directory: core/, internal/, detail/, src/
+          #   2. a relative escape out of include/: "../src/..."
+          # The second matters because a header can reach src/ without naming it.
+          if grep -rn --include='*.h' --include='*.hpp' \
+               -E '#include[[:space:]]*[<"](lootlocker/)?(core|internal|detail|src)/|#include[[:space:]]*[<"][.][.]/' \
+               include/; then
+            echo "::error::A public header includes a private header. See D18."
+            exit 1
+          fi
+          echo "include/ is clean"
+
+      - name: No public header includes the JSON library
+        run: |
+          set -e
+          # D4: the JSON library lives behind a pimpl. A public header that includes it
+          # would make our parser choice part of the API and undo the pimpl in one line.
+          if grep -rn --include='*.h' --include='*.hpp' \
+               -E '#include[[:space:]]*[<"](nlohmann|rapidjson)' \
+               include/; then
+            echo "::error::A public header includes the JSON library. See D4."
+            exit 1
+          fi
+          echo "no public header includes the JSON library"
