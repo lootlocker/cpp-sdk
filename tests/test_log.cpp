@@ -4,6 +4,8 @@
 // player's crash report.
 
 #include <lootlocker/config.h>
+#include <lootlocker/config_cli.h>
+#include <lootlocker/config_file.h>
 #include <lootlocker/log.h>
 
 #include "test_harness.h"
@@ -300,6 +302,115 @@ void TestConfigCarriesTheSeam()
 
 } // namespace
 
+void TestUnicodeEscapedKeysAreMasked()
+{
+    // A key written with a \u escape is the same key to every JSON parser, so a
+    // backslash-stripping "decoder" would leave the token readable. This is the bypass
+    // that made the first implementation wrong.
+    const char* const bodies[] = {
+        "{\"sess\\u0069on_token\":\"SECRETVALUE123\"}",
+        "{\"\\u0070assword\":\"SECRETVALUE123\"}",
+        "{\"\\u0073\\u0065\\u0073\\u0073\\u0069\\u006f\\u006e\\u005f\\u0074\\u006f\\u006b\\u0065\\u006e\":\"SECRETVALUE123\"}",
+    };
+    for (std::size_t i = 0; i < sizeof(bodies) / sizeof(bodies[0]); ++i) {
+        const std::string out = lootlocker::log::ObfuscateJson(bodies[i]);
+        if (out.find("SECRETVALUE123") != std::string::npos) {
+            CHECK_EQ(std::string("escaped key leaked: ") + bodies[i], "masked");
+        }
+    }
+}
+
+void TestCompositeValueIsReplacedWholesale()
+{
+    // Asserting the exact output, not "the secret is absent": masking an array with the
+    // scalar policy also removes the full strings, so a substring check passes even when
+    // bytes from inside the array are retained. The retained bytes are the bug.
+    CHECK_EQ(lootlocker::log::ObfuscateJson(
+                 "{\"session_token\":[\"SECRETVALUE123\",\"SECONDVALUE456\"]}"),
+             "{\"session_token\":\"***\"}");
+
+    CHECK_EQ(lootlocker::log::ObfuscateJson(
+                 "{\"session_token\":{\"inner\":\"SECRETVALUE123\"}}"),
+             "{\"session_token\":\"***\"}");
+}
+
+void TestUnterminatedStringDoesNotUnderflow()
+{
+    // SkipString returns body.size() for an unterminated string, so subtracting the
+    // closing quote underflows size_t and asks for an enormous string - which terminates
+    // the process in a no-exceptions build rather than returning the body.
+    const char* const bodies[] = {
+        "{\"session_token\":\"",
+        "{\"session_token\":\"abc",
+        "\"",
+        "{\"a\":\"b\",\"session_token\":\"",
+    };
+    for (std::size_t i = 0; i < sizeof(bodies) / sizeof(bodies[0]); ++i) {
+        const std::string out = lootlocker::log::ObfuscateJson(bodies[i]);
+        CHECK(!out.empty());
+    }
+}
+
+void TestSeparatorWhitespaceSurvives()
+{
+    // The contract is byte-identical apart from the masked value, so the whitespace
+    // around the colon must not be rewritten.
+    const std::string out = lootlocker::log::ObfuscateJson(
+        "{ \"session_token\" : \"SECRETVALUE123\" }");
+    CHECK(out.find("{ \"session_token\" : ") != std::string::npos);
+    CHECK(out.find("SECRETVALUE123") == std::string::npos);
+}
+
+void TestLogExchangeObfuscatesBeforeTheSink()
+{
+    // The whole point of the dispatch: a custom logger must never see an unmasked body,
+    // because it cannot be trusted to obfuscate and a new call site cannot be trusted to
+    // remember.
+    RecordingLogger logger;
+    lootlocker::log::HttpEntry entry;
+    entry.method = "POST";
+    entry.url = "https://x/y";
+    entry.status_code = 200;
+    entry.request_body = "{\"password\":\"SECRETVALUE123\"}";
+    entry.response_body = "{\"session_token\":\"SECRETVALUE123\"}";
+
+    lootlocker::log::LogExchange(logger, entry);
+
+    CHECK_EQ_INT(static_cast<long long>(logger.http_entries.size()), 1);
+    CHECK(logger.http_entries[0].request_body.find("SECRETVALUE123") == std::string::npos);
+    CHECK(logger.http_entries[0].response_body.find("SECRETVALUE123") == std::string::npos);
+    // The caller's entry is untouched: the dispatch copies.
+    CHECK(entry.response_body.find("SECRETVALUE123") != std::string::npos);
+}
+
+void TestLogLevelFromConfigFile()
+{
+    lootlocker::Config config;
+    const std::string json = "{\"domain_key\":\"d\",\"game_key\":\"g\",\"game_version\":\"1.0.0\",\"log_level\":\"Verbose\"}";
+    const auto result = lootlocker::config_file::LoadFromString(json, config);
+    CHECK(result.Ok());
+    CHECK(config.log_level == lootlocker::LogLevel::Verbose);
+
+    lootlocker::Config bad;
+    const auto bad_result = lootlocker::config_file::LoadFromString(
+        "{\"domain_key\":\"d\",\"game_key\":\"g\",\"game_version\":\"1.0.0\",\"log_level\":\"Chatty\"}", bad);
+    CHECK(!bad_result.Ok());
+}
+
+void TestLogLevelFromCommandLine()
+{
+    lootlocker::Config config;
+    const std::vector<std::string> args = {"--domain-key", "d", "--game-key", "g", "--game-version", "1.0.0",
+                                           "--log-level", "verbose"};
+    const auto result = lootlocker::config_cli::Apply(args, config);
+    CHECK(result.Ok());
+    CHECK(config.log_level == lootlocker::LogLevel::Verbose);
+
+    lootlocker::Config bad;
+    const std::vector<std::string> bad_args = {"--log-level", "Chatty"};
+    CHECK(!lootlocker::config_cli::Apply(bad_args, bad).Ok());
+}
+
 int main()
 {
     TestLevelNames();
@@ -318,6 +429,13 @@ int main()
     TestHttpEntryReachesTheCustomLogger();
     TestDefaultLogHttpFallsBackToText();
     TestConfigCarriesTheSeam();
+    TestUnicodeEscapedKeysAreMasked();
+    TestCompositeValueIsReplacedWholesale();
+    TestUnterminatedStringDoesNotUnderflow();
+    TestSeparatorWhitespaceSurvives();
+    TestLogExchangeObfuscatesBeforeTheSink();
+    TestLogLevelFromConfigFile();
+    TestLogLevelFromCommandLine();
 
     return testing::Report();
 }
