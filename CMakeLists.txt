@@ -43,7 +43,13 @@ if(MSVC)
     string(REGEX REPLACE "/EHsc" "" CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
     string(REGEX REPLACE "/EHsc" "" CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
     target_compile_options(lootlocker_compile_options INTERFACE
-        /W4 /permissive- /EHs-c- /GR- /utf-8)
+        /W4 /permissive- /EHs-c- /GR- /utf-8
+        # fopen is not unsafe; the deprecation is a CRT nudge toward fopen_s, which is
+        # not portable. We use plain C stdio deliberately.
+        /D_CRT_SECURE_NO_WARNINGS
+        # nlohmann's internals reference exception machinery even when parsing is
+        # non-throwing, which trips C4530 under /EHs-c-. The SDK itself never throws.
+        /wd4530)
 else()
     target_compile_options(lootlocker_compile_options INTERFACE
         -Wall -Wextra -Wpedantic -fno-exceptions -fno-rtti)
@@ -73,6 +79,10 @@ configure_file(
 
 add_library(lootlocker_core STATIC
     src/core/version.cpp
+    src/core/result.cpp
+    src/core/config.cpp
+    src/core/config_file.cpp
+    src/core/config_cli.cpp
 )
 add_library(LootLocker::core ALIAS lootlocker_core)
 
@@ -83,6 +93,7 @@ target_include_directories(lootlocker_core
         $<INSTALL_INTERFACE:include>
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party
 )
 target_link_libraries(lootlocker_core PRIVATE lootlocker_compile_options)
 target_compile_definitions(lootlocker_core PRIVATE LOOTLOCKER_BUILDING_LIBRARY)
@@ -114,5 +125,6 @@ endif()
 if(LOOTLOCKER_BUILD_EXAMPLES)
     add_subdirectory(examples)
 endif()
+
 
 

@@ -13,6 +13,14 @@ target_compile_definitions(test_version PRIVATE
     LOOTLOCKER_EXPECTED_PATCH=${PROJECT_VERSION_PATCH})
 add_test(NAME version COMMAND test_version)
 
+add_executable(test_result test_result.cpp)
+target_link_libraries(test_result PRIVATE LootLocker::core lootlocker_compile_options)
+add_test(NAME result COMMAND test_result)
+
+add_executable(test_config test_config.cpp)
+target_link_libraries(test_config PRIVATE LootLocker::core lootlocker_compile_options)
+add_test(NAME config COMMAND test_config)
+
 # Tier 2 (D14): a tiny consumer that links only one module, proving the target graph and
 # the headers work from outside the library. It deliberately does NOT link broadcasts.
 #
