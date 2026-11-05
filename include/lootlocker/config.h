@@ -8,6 +8,7 @@
 // struct; the adopter calls them, or fills the struct by hand, or both in either order.
 // Precedence is the adopter's business, not the SDK's.
 
+#include <lootlocker/log.h>
 #include <lootlocker/result.h>
 
 #include <cstdint>
@@ -15,7 +16,6 @@
 
 namespace lootlocker {
 
-class Logger;
 class StateWriter;
 class IHttpTransport;
 class TimezoneProvider;
@@ -84,6 +84,14 @@ struct Config {
     Logger*         logger       = nullptr;   // default writes to stderr
     StateWriter*    state_writer = nullptr;   // default is FileStateWriter
     IHttpTransport* transport    = nullptr;   // default is the libcurl one
+
+    // The least-verbose level the SDK emits (D26).
+    //
+    // `NoLogging` silences the SDK without replacing the logger, which is what a shipped
+    // game wants: the logger is still there for a bug report build, and nothing is
+    // constructed differently. Levels are ordered most severe first, so this is a maximum
+    // in terms of severity and a minimum in terms of volume.
+    LogLevel log_level = LogLevel::Warning;
 
     // Empty means resolve it: the injected provider, then the OS, then Etc/UTC (D26).
     //

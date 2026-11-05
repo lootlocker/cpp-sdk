@@ -25,6 +25,10 @@ add_executable(test_timezone test_timezone.cpp)
 target_link_libraries(test_timezone PRIVATE LootLocker::core lootlocker_compile_options)
 add_test(NAME timezone COMMAND test_timezone)
 
+add_executable(test_log test_log.cpp)
+target_link_libraries(test_log PRIVATE LootLocker::core lootlocker_compile_options)
+add_test(NAME log COMMAND test_log)
+
 # Tier 2 (D14): a tiny consumer that links only one module, proving the target graph and
 # the headers work from outside the library. It deliberately does NOT link broadcasts.
 #

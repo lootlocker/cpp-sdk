@@ -118,6 +118,7 @@ add_library(lootlocker_core STATIC
     src/core/config_file.cpp
     src/core/config_cli.cpp
     src/core/timezone.cpp
+    src/core/log.cpp
 )
 add_library(LootLocker::core ALIAS lootlocker_core)
 
