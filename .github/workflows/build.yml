@@ -36,6 +36,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -61,6 +63,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Each module builds alone
         run: |
@@ -82,6 +86,29 @@ jobs:
                 -DLOOTLOCKER_MODULE_ONLY=core
           cmake --build build-core --target lootlocker_core --parallel
 
+      # The option takes a list, so a subset of modules must work too. This is the shape a
+      # game actually uses: it names the modules it wants, not one and not all.
+      - name: A subset of modules builds
+        run: |
+          set -e
+          cmake -S . -B build-subset -DCMAKE_BUILD_TYPE=Release \
+                -DLOOTLOCKER_BUILD_TESTS=OFF -DLOOTLOCKER_BUILD_EXAMPLES=OFF \
+                "-DLOOTLOCKER_MODULE_ONLY=auth;broadcasts"
+          cmake --build build-subset --target lootlocker_auth lootlocker_broadcasts --parallel
+
+      # A typo must fail loudly. It used to configure cleanly and declare no feature
+      # targets at all, which reads as "the SDK is broken" rather than "the name is wrong".
+      - name: An unknown module name fails the configure
+        run: |
+          set -e
+          if cmake -S . -B build-typo -DCMAKE_BUILD_TYPE=Release \
+                   -DLOOTLOCKER_BUILD_TESTS=OFF -DLOOTLOCKER_BUILD_EXAMPLES=OFF \
+                   -DLOOTLOCKER_MODULE_ONLY=autth 2>&1; then
+            echo "::error::An unknown module name configured successfully; it must fail."
+            exit 1
+          fi
+          echo "an unknown module name fails the configure, as intended"
+
   # T8b: nothing under include/ may reach into src/. The include path is the boundary
   # (D18), so a public header that includes a private one breaks the contract even though
   # it compiles in-tree.
@@ -90,6 +117,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: No public header includes a private one
         run: |
@@ -128,14 +157,35 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Regenerating produces no diff
         run: |
           set -e
           python3 tools/generate_timezone_table.py
-          if ! git diff --quiet; then
-            echo "::error::A generated file is out of date. Run tools/generate_timezone_table.py and commit the result."
-            git --no-pager diff
+          # Scoped to the generated file. A submodule checkout can leave the submodule
+          # dirty, and an unscoped `git diff` would then fail this job for a reason that
+          # has nothing to do with generated files.
+          if ! git diff --quiet -- src/core/timezone_table.inc; then
+            echo "::error::src/core/timezone_table.inc is out of date. Run tools/generate_timezone_table.py and commit the result."
+            git --no-pager diff -- src/core/timezone_table.inc
             exit 1
           fi
           echo "generated files are current"
+
+      # The same regeneration through CMake, which is the path packaging uses. This proves
+      # the option works rather than only that the script does.
+      - name: The CMake regeneration option works
+        run: |
+          set -e
+          cmake -S . -B build-gen -DCMAKE_BUILD_TYPE=Release \
+                -DLOOTLOCKER_BUILD_TESTS=OFF -DLOOTLOCKER_BUILD_EXAMPLES=OFF \
+                -DLOOTLOCKER_REGENERATE_TIMEZONE=ON
+          cmake --build build-gen --target lootlocker_generate_timezone
+          if ! git diff --quiet -- src/core/timezone_table.inc; then
+            echo "::error::The CMake regeneration produced a different table than the script."
+            git --no-pager diff -- src/core/timezone_table.inc
+            exit 1
+          fi
+          echo "the CMake regeneration option produces the same table"

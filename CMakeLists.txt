@@ -18,7 +18,20 @@ endif()
 option(LOOTLOCKER_BUILD_TESTS "Build the SDK's own tests" ON)
 option(LOOTLOCKER_BUILD_EXAMPLES "Build the examples" ON)
 
-# Declare only one feature module, plus the core it depends on.
+# Regenerate the timezone table from data/windows-to-iana.tsv at configure time.
+#
+# OFF by default, and it must stay that way. The generator is Python, and requiring Python
+# in every adopter's build pipeline — including consoles, where the toolchain is already
+# the hard part — would be a worse trade than a checked-in generated file. The table is
+# committed precisely so an adopter never needs the generator.
+#
+# Packaging turns it on: our release workflow controls its environment, so regenerating
+# there is free and guarantees the shipped table matches its source. CI also runs the
+# generator directly and fails on any diff, which catches a hand-edited table on every PR.
+option(LOOTLOCKER_REGENERATE_TIMEZONE
+    "Regenerate src/core/timezone_table.inc from data/windows-to-iana.tsv (needs Python)" OFF)
+
+# Declare only the named feature modules, plus the core they depend on.
 #
 # This exists so the module-boundary CI job can prove isolation. Configuring the whole
 # project and building one target does NOT prove it: CMake resolves the target's link
@@ -26,9 +39,26 @@ option(LOOTLOCKER_BUILD_EXAMPLES "Build the examples" ON)
 # broadcasts too and the job would still pass. With this set, the other feature targets
 # are never declared, so a cross-module dependency cannot be satisfied.
 #
-# Empty (the default) declares every module.
+# A list, so `-DLOOTLOCKER_MODULE_ONLY=auth;broadcasts` declares exactly those two. One
+# module is just a list of one. Empty (the default) declares every module.
 set(LOOTLOCKER_MODULE_ONLY "" CACHE STRING
-    "Declare only this feature module (core is always declared). Empty = all modules.")
+    "Declare only these feature modules, semicolon-separated (core is always declared). Empty = all modules.")
+
+# Validate the list rather than silently declaring nothing. A typo in a module name used
+# to produce a configure that succeeded and a build with no feature targets at all, which
+# is the kind of failure that gets diagnosed as "the SDK is broken".
+#
+# `core` is accepted as an input even though it is not a feature module: naming it means
+# "core and no feature modules", which is how the CI proves core builds alone.
+set(LOOTLOCKER_FEATURE_MODULES auth broadcasts)
+set(LOOTLOCKER_SELECTABLE_MODULES core ${LOOTLOCKER_FEATURE_MODULES})
+foreach(requested IN LISTS LOOTLOCKER_MODULE_ONLY)
+    if(NOT requested IN_LIST LOOTLOCKER_SELECTABLE_MODULES)
+        message(FATAL_ERROR
+            "LOOTLOCKER_MODULE_ONLY contains '${requested}', which is not a module. "
+            "Known modules: ${LOOTLOCKER_SELECTABLE_MODULES}.")
+    endif()
+endforeach()
 
 # No exceptions and no RTTI in the public contract (D7). These are applied to our targets
 # only, never to a consumer's.
@@ -94,16 +124,17 @@ target_include_directories(lootlocker_core
         $<INSTALL_INTERFACE:include>
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
-        ${CMAKE_CURRENT_SOURCE_DIR}/third_party
+        # nlohmann/json is a submodule pinned to a tag (see .gitmodules). Only the
+        # single-header include root is on the path, so `#include <nlohmann/json.hpp>`
+        # resolves without exposing the rest of the checkout.
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann-json/single_include
 )
 target_link_libraries(lootlocker_core PRIVATE lootlocker_compile_options)
 target_compile_definitions(lootlocker_core PRIVATE LOOTLOCKER_BUILDING_LIBRARY)
 
 # Each feature module is declared only when it is wanted. See LOOTLOCKER_MODULE_ONLY.
-set(LOOTLOCKER_FEATURE_MODULES auth broadcasts)
-
 foreach(module IN LISTS LOOTLOCKER_FEATURE_MODULES)
-    if(LOOTLOCKER_MODULE_ONLY AND NOT LOOTLOCKER_MODULE_ONLY STREQUAL module)
+    if(LOOTLOCKER_MODULE_ONLY AND NOT module IN_LIST LOOTLOCKER_MODULE_ONLY)
         continue()
     endif()
 
@@ -128,4 +159,34 @@ if(LOOTLOCKER_BUILD_EXAMPLES)
 endif()
 
 
+# ---------------------------------------------------------------------------
+# Generated timezone table (D26)
+#
+# The table is checked in, so a normal build never runs this. See
+# LOOTLOCKER_REGENERATE_TIMEZONE for why it is opt-in.
+# ---------------------------------------------------------------------------
+
+if(LOOTLOCKER_REGENERATE_TIMEZONE)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+
+    set(LOOTLOCKER_TIMEZONE_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/data/windows-to-iana.tsv")
+    set(LOOTLOCKER_TIMEZONE_GENERATED "${CMAKE_CURRENT_SOURCE_DIR}/src/core/timezone_table.inc")
+
+    add_custom_command(
+        OUTPUT "${LOOTLOCKER_TIMEZONE_GENERATED}"
+        COMMAND Python3::Interpreter
+                "${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_timezone_table.py"
+        DEPENDS "${LOOTLOCKER_TIMEZONE_SOURCE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_timezone_table.py"
+        COMMENT "Regenerating the timezone table from data/windows-to-iana.tsv"
+        VERBATIM)
+
+    # A custom target rather than a configure-time execute_process: the generator writes
+    # into the source tree, and doing that during configure would make a read-only checkout
+    # fail to configure at all. As a target it runs when asked, and the dependency on the
+    # TSV means it re-runs only when the source data changes.
+    add_custom_target(lootlocker_generate_timezone
+        DEPENDS "${LOOTLOCKER_TIMEZONE_GENERATED}")
+    add_dependencies(lootlocker_core lootlocker_generate_timezone)
+endif()
 

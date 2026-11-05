@@ -42,6 +42,10 @@ in this Software without prior written authorization of the copyright holder.
 
 Used behind a pimpl as the JSON layer (D4). Not exposed in any public header.
 
+Vendored as a git submodule at `third_party/nlohmann-json`, pinned to tag `v3.11.3`
+(commit `9cca280a4d0ccf0c08f47a99aa71d1b0e52f8d03`). A fresh clone needs
+`--recursive`.
+
 ```
 MIT License
 
