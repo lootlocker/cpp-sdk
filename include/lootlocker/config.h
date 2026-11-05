@@ -99,6 +99,13 @@ struct Config {
     // wrong for a game whose player picked a timezone in a menu.
     TimezoneProvider* timezone_provider = nullptr;
 
+    // False means send no timezone at all, so the server treats the player as UTC.
+    //
+    // A separate flag rather than an empty `timezone`, because empty means "resolve it".
+    // Overloading one field for both would make "I have no opinion" and "I have an opinion
+    // and it is none" indistinguishable.
+    bool send_timezone = true;
+
     QueueConfig     queue;
     RateLimitConfig rate_limit;
 

@@ -96,8 +96,45 @@ void TestKnownChecks()
 {
     CHECK(lootlocker::IsKnownIanaTimezone("Europe/Berlin"));
     CHECK(lootlocker::IsKnownWindowsTimezone("W. Europe Standard Time"));
-    CHECK(!lootlocker::IsKnownIanaTimezone("Not/AZone"));
     CHECK(!lootlocker::IsKnownWindowsTimezone("Not A Zone"));
+
+    // `IsKnownIanaTimezone` is a shape check, not a table lookup, so a well-formed name the
+    // table has never heard of is accepted. The server rejects it if it does not exist.
+    CHECK(lootlocker::IsKnownIanaTimezone("Not/AZone"));
+}
+
+void TestIanaCheckAcceptsNamesOutsideTheTable()
+{
+    // The table is a Windows mapping, not the IANA database. A real zone with no row in it
+    // must still be accepted, or a correct system timezone falls through to UTC.
+    CHECK(lootlocker::IsKnownIanaTimezone("America/Argentina/Buenos_Aires"));
+    CHECK(lootlocker::IsKnownIanaTimezone("Asia/Kolkata"));
+    CHECK(lootlocker::IsKnownIanaTimezone("Etc/GMT+5"));
+
+    // Shape failures.
+    CHECK(!lootlocker::IsKnownIanaTimezone(""));
+    CHECK(!lootlocker::IsKnownIanaTimezone("Berlin"));
+    CHECK(!lootlocker::IsKnownIanaTimezone("/Europe/Berlin"));
+    CHECK(!lootlocker::IsKnownIanaTimezone("Europe/Berlin/"));
+    CHECK(!lootlocker::IsKnownIanaTimezone("Europe/Ber lin"));
+    CHECK(!lootlocker::IsKnownIanaTimezone("Europe/Berlin;rm -rf"));
+}
+
+void TestHugeNumericOffsetClampsInsteadOfWrapping()
+{
+    // Clamping must happen while the value is still a `long`. Casting first is
+    // implementation-defined for an out-of-range value and can wrap to a small or negative
+    // offset, which would silently produce the wrong zone.
+    //
+    // This only bites where `long` is wider than `int` (LP64: Linux, macOS). On Windows
+    // `long` is 32-bit, so `strtol` saturates at LONG_MAX and the cast is harmless — which
+    // is why the Windows run alone would not catch a regression here.
+    std::string out;
+    CHECK(lootlocker::TryNormalizeToIana("99999999999999999999", out));
+    CHECK_EQ(out, "Etc/GMT-14");
+
+    CHECK(lootlocker::TryNormalizeToIana("-99999999999999999999", out));
+    CHECK_EQ(out, "Etc/GMT+12");
 }
 
 void TestUtcOffsetUsesReversedIanaSign()
@@ -212,6 +249,14 @@ void TestOverrideIsNormalized()
     CHECK_EQ(lootlocker::ResolveTimezone(nullptr, "W. Europe Standard Time"), "Europe/Berlin");
 }
 
+void TestSendFalseReturnsNothing()
+{
+    // "Send no timezone" is a separate flag, not an empty override, because empty means
+    // "resolve it". It outranks the override and the provider.
+    CHECK_EQ(lootlocker::ResolveTimezone(nullptr, "Europe/Berlin", false), "");
+    CHECK_EQ(lootlocker::ResolveTimezone(nullptr, "", false), "");
+}
+
 void TestSystemProviderReturnsSomethingValid()
 {
     // The OS read may fail on an unusual machine, but it must never return a name the
@@ -233,6 +278,8 @@ int main()
     TestEmptyInputFails();
     TestReverseConversion();
     TestKnownChecks();
+    TestIanaCheckAcceptsNamesOutsideTheTable();
+    TestHugeNumericOffsetClampsInsteadOfWrapping();
     TestUtcOffsetUsesReversedIanaSign();
     TestUtcOffsetClamps();
     TestNormalizeAcceptsAllForms();
@@ -245,6 +292,7 @@ int main()
     TestEmptyProviderFallsThrough();
     TestNullProviderStillResolves();
     TestOverrideIsNormalized();
+    TestSendFalseReturnsNothing();
     TestSystemProviderReturnsSomethingValid();
 
     return testing::Report();

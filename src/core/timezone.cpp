@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -14,7 +15,7 @@
 #    define NOMINMAX
 #  endif
 #  include <windows.h>
-#else
+#elif defined(__unix__) || defined(__APPLE__)
 #  include <unistd.h>
 #endif
 
@@ -91,8 +92,34 @@ bool TryConvertIanaToWindows(const std::string& iana_name, std::string& out)
 
 bool IsKnownIanaTimezone(const std::string& name)
 {
-    std::string ignored;
-    return TryConvertIanaToWindows(name, ignored);
+    // Deliberately not "is it in the table". The table is a Windows mapping, not the IANA
+    // database, so it holds one representative per Windows zone and misses real names like
+    // America/Argentina/Buenos_Aires. Validating against it would reject a correct system
+    // timezone and silently fall through to UTC.
+    //
+    // The shape check is what the API actually needs: a well-formed Area/Location path.
+    // The server is the authority on whether the zone exists.
+    if (name.empty() || name.size() > 64) {
+        return false;
+    }
+    if (name[0] == '/' || name[name.size() - 1] == '/') {
+        return false;
+    }
+    bool has_slash = false;
+    for (std::size_t i = 0; i < name.size(); ++i) {
+        const char c = name[i];
+        if (c == '/') {
+            has_slash = true;
+            continue;
+        }
+        const bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                        (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '+' ||
+                        c == '.';
+        if (!ok) {
+            return false;
+        }
+    }
+    return has_slash;
 }
 
 bool IsKnownWindowsTimezone(const std::string& name)
@@ -137,7 +164,16 @@ bool TryNormalizeToIana(const std::string& timezone, std::string& out)
         char* end = nullptr;
         const long parsed = std::strtol(begin, &end, 10);
         if (end != begin && *end == '\0') {
-            out = UtcOffsetToIana(static_cast<int>(parsed));
+            // Clamp while still a `long`: casting first would make an out-of-range value
+            // implementation-defined, and it could wrap to a small or negative offset.
+            long hours = parsed;
+            if (hours < -12) {
+                hours = -12;
+            }
+            if (hours > 14) {
+                hours = 14;
+            }
+            out = UtcOffsetToIana(static_cast<int>(hours));
             return true;
         }
     }
@@ -187,7 +223,7 @@ std::string SystemTimezoneProvider::GetTimezone()
         }
     }
     return std::string();
-#else
+#elif defined(__unix__) || defined(__APPLE__)
     // POSIX: TZ first, then /etc/localtime, then give up and let the caller fall back.
     const char* tz_env = std::getenv("TZ");
     if (tz_env != nullptr && tz_env[0] != '\0') {
@@ -213,11 +249,21 @@ std::string SystemTimezoneProvider::GetTimezone()
     }
 
     return std::string();
+#else
+    // A platform we do not cover. The contract says UTC, so return nothing and let
+    // ResolveTimezone fall through to kDefaultIanaTimezone.
+    return std::string();
 #endif
 }
 
-std::string ResolveTimezone(TimezoneProvider* provider, const std::string& override_value)
+std::string ResolveTimezone(TimezoneProvider* provider, const std::string& override_value,
+                            bool send)
 {
+    // An adopter who said "send nothing" meant it, and it outranks everything else.
+    if (!send) {
+        return std::string();
+    }
+
     // An explicit override wins outright: an adopter who set it meant it.
     if (!override_value.empty()) {
         std::string iana;
