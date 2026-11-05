@@ -24,6 +24,14 @@ features are being built. Nothing here is ready to ship against.
 
 ## Using it
 
+The SDK vendors nlohmann/json as a submodule, so clone recursively:
+
+```sh
+git clone --recursive https://github.com/lootlocker/cpp-sdk.git
+```
+
+Then:
+
 ```cmake
 add_subdirectory(third_party/cpp-sdk)
 
@@ -32,7 +40,9 @@ target_link_libraries(my_game PRIVATE
     LootLocker::broadcasts)
 ```
 
-Only what you name is compiled and linked.
+Only what you name is compiled and linked. To declare a subset of modules without
+`add_subdirectory` deciding for you, pass
+`-DLOOTLOCKER_MODULE_ONLY=auth;broadcasts`.
 
 ## What is in v1
 
@@ -58,8 +68,7 @@ The design decisions, the risk register and the public API sketch live in the in
 ## Contributing
 
 Feature branches come off `dev` and are rebased onto it, never merged into it. `main` is
-releases only. See [`.github/copilot-instructions.md`](.github/copilot-instructions.md)
-for the conventions this codebase enforces.
+releases only. See [`AGENTS.md`](AGENTS.md) for the conventions this codebase enforces.
 
 ## Licence
 
