@@ -18,7 +18,7 @@ endif()
 option(LOOTLOCKER_BUILD_TESTS "Build the SDK's own tests" ON)
 option(LOOTLOCKER_BUILD_EXAMPLES "Build the examples" ON)
 
-# Regenerate the timezone table from data/windows-to-iana.tsv at configure time.
+# Regenerate the timezone table from data/windows-to-iana.tsv at build time.
 #
 # OFF by default, and it must stay that way. The generator is Python, and requiring Python
 # in every adopter's build pipeline — including consoles, where the toolchain is already
@@ -172,21 +172,13 @@ if(LOOTLOCKER_REGENERATE_TIMEZONE)
     set(LOOTLOCKER_TIMEZONE_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/data/windows-to-iana.tsv")
     set(LOOTLOCKER_TIMEZONE_GENERATED "${CMAKE_CURRENT_SOURCE_DIR}/src/core/timezone_table.inc")
 
-    add_custom_command(
-        OUTPUT "${LOOTLOCKER_TIMEZONE_GENERATED}"
+    add_custom_target(lootlocker_generate_timezone
         COMMAND Python3::Interpreter
                 "${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_timezone_table.py"
         DEPENDS "${LOOTLOCKER_TIMEZONE_SOURCE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_timezone_table.py"
         COMMENT "Regenerating the timezone table from data/windows-to-iana.tsv"
         VERBATIM)
-
-    # A custom target rather than a configure-time execute_process: the generator writes
-    # into the source tree, and doing that during configure would make a read-only checkout
-    # fail to configure at all. As a target it runs when asked, and the dependency on the
-    # TSV means it re-runs only when the source data changes.
-    add_custom_target(lootlocker_generate_timezone
-        DEPENDS "${LOOTLOCKER_TIMEZONE_GENERATED}")
     add_dependencies(lootlocker_core lootlocker_generate_timezone)
 endif()
 

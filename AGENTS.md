@@ -91,7 +91,7 @@ ctest --test-dir build --output-on-failure
 
 Two options matter when you are not just building:
 
-- `-DLOOTLOCKER_MODULE_ONLY=auth;broadcasts` declares only those feature modules. It is a
+- `-DLOOTLOCKER_MODULE_ONLY="auth;broadcasts"` declares only those feature modules. It is a
   list; one module is a list of one. This is how the module-boundary CI proves isolation,
   and it is how a game names the modules it uses.
 - `-DLOOTLOCKER_REGENERATE_TIMEZONE=ON` regenerates `src/core/timezone_table.inc` from
