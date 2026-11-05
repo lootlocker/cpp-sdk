@@ -1,6 +1,11 @@
-// A deliberately dependency-free test runner. T8 has one thing to assert; pulling in a
-// test framework before there is anything to test would be a decision made too early.
-// T19 replaces this with whatever the tier-1 suite needs.
+// The version must come from one place: the `project(LootLocker VERSION ...)` line.
+//
+// The previous version of this test compared the header's macros against GetVersion(),
+// which both derive from the same header — so it could never catch the header drifting
+// from CMake. This one compares against the version CMake was configured with, passed in
+// as a compile definition, so a stale generated header fails here.
+
+#include "test_harness.h"
 
 #include <lootlocker/version.h>
 
@@ -9,32 +14,44 @@
 
 namespace {
 
-int g_failures = 0;
-
-void Check(bool condition, const char* what)
+void TestVersionMatchesCmake()
 {
-    if (!condition) {
-        std::fprintf(stderr, "FAIL: %s\n", what);
-        ++g_failures;
-    }
+    const lootlocker::Version v = lootlocker::GetVersion();
+
+    CHECK_EQ_INT(v.major, LOOTLOCKER_EXPECTED_MAJOR);
+    CHECK_EQ_INT(v.minor, LOOTLOCKER_EXPECTED_MINOR);
+    CHECK_EQ_INT(v.patch, LOOTLOCKER_EXPECTED_PATCH);
+}
+
+void TestVersionStringMatchesCmake()
+{
+    // The string form must agree with the numeric form, and both with CMake.
+    char expected[64];
+    std::snprintf(expected, sizeof(expected), "%d.%d.%d", LOOTLOCKER_EXPECTED_MAJOR,
+                  LOOTLOCKER_EXPECTED_MINOR, LOOTLOCKER_EXPECTED_PATCH);
+
+    CHECK_EQ(lootlocker::GetVersionString(), std::string(expected));
+}
+
+void TestVersionStringIsStaticStorage()
+{
+    // Documented as returning static storage, not an allocation. Two calls must return the
+    // same pointer, and the pointer must be stable.
+    const char* a = lootlocker::GetVersionString();
+    const char* b = lootlocker::GetVersionString();
+
+    CHECK(a == b);
+    CHECK(a != nullptr);
+    CHECK(std::strlen(a) > 0);
 }
 
 } // namespace
 
 int main()
 {
-    const lootlocker::Version v = lootlocker::GetVersion();
-    Check(v.major == LOOTLOCKER_VERSION_MAJOR, "major matches the header");
-    Check(v.minor == LOOTLOCKER_VERSION_MINOR, "minor matches the header");
-    Check(v.patch == LOOTLOCKER_VERSION_PATCH, "patch matches the header");
+    TestVersionMatchesCmake();
+    TestVersionStringMatchesCmake();
+    TestVersionStringIsStaticStorage();
 
-    Check(std::strcmp(lootlocker::GetVersionString(), "0.1.0") == 0,
-          "version string is 0.1.0");
-
-    if (g_failures == 0) {
-        std::printf("all checks passed\n");
-        return 0;
-    }
-    std::fprintf(stderr, "%d check(s) failed\n", g_failures);
-    return 1;
+    return testing::Report();
 }

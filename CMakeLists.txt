@@ -1,7 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 
-# The version lives here and nowhere else. The release workflow reads it from this line,
-# so there is exactly one place to change it (D15).
+# The version lives here and nowhere else. `configure_file` below turns it into
+# include/lootlocker/version.h, so the compile-time constants and GetVersionString() cannot
+# drift from this line (D15).
 project(LootLocker VERSION 0.1.0 LANGUAGES CXX)
 
 # C++17 is the floor (D1). It is a hard requirement, not a preference: the SDK uses
@@ -16,6 +17,18 @@ endif()
 
 option(LOOTLOCKER_BUILD_TESTS "Build the SDK's own tests" ON)
 option(LOOTLOCKER_BUILD_EXAMPLES "Build the examples" ON)
+
+# Declare only one feature module, plus the core it depends on.
+#
+# This exists so the module-boundary CI job can prove isolation. Configuring the whole
+# project and building one target does NOT prove it: CMake resolves the target's link
+# dependencies, so if auth started linking broadcasts, building auth would build
+# broadcasts too and the job would still pass. With this set, the other feature targets
+# are never declared, so a cross-module dependency cannot be satisfied.
+#
+# Empty (the default) declares every module.
+set(LOOTLOCKER_MODULE_ONLY "" CACHE STRING
+    "Declare only this feature module (core is always declared). Empty = all modules.")
 
 # No exceptions and no RTTI in the public contract (D7). These are applied to our targets
 # only, never to a consumer's.
@@ -37,6 +50,21 @@ else()
 endif()
 
 # ---------------------------------------------------------------------------
+# Generated version header
+#
+# The single source of truth is the `project(... VERSION ...)` line above. Both the
+# compile-time constants and GetVersionString() come from it, so bumping the version is a
+# one-line change and the test below can catch drift.
+# ---------------------------------------------------------------------------
+
+set(LOOTLOCKER_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/version.h.in"
+    "${LOOTLOCKER_GENERATED_DIR}/lootlocker/version.h"
+    @ONLY
+)
+
+# ---------------------------------------------------------------------------
 # Targets (D17)
 #
 # One target per feature module. There is deliberately NO umbrella target: a game names
@@ -50,6 +78,7 @@ add_library(LootLocker::core ALIAS lootlocker_core)
 
 target_include_directories(lootlocker_core
     PUBLIC
+        $<BUILD_INTERFACE:${LOOTLOCKER_GENERATED_DIR}>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
     PRIVATE
@@ -58,17 +87,20 @@ target_include_directories(lootlocker_core
 target_link_libraries(lootlocker_core PRIVATE lootlocker_compile_options)
 target_compile_definitions(lootlocker_core PRIVATE LOOTLOCKER_BUILDING_LIBRARY)
 
-add_library(lootlocker_auth STATIC
-    src/auth/auth.cpp
-)
-add_library(LootLocker::auth ALIAS lootlocker_auth)
-target_link_libraries(lootlocker_auth PUBLIC LootLocker::core PRIVATE lootlocker_compile_options)
+# Each feature module is declared only when it is wanted. See LOOTLOCKER_MODULE_ONLY.
+set(LOOTLOCKER_FEATURE_MODULES auth broadcasts)
 
-add_library(lootlocker_broadcasts STATIC
-    src/broadcasts/broadcasts.cpp
-)
-add_library(LootLocker::broadcasts ALIAS lootlocker_broadcasts)
-target_link_libraries(lootlocker_broadcasts PUBLIC LootLocker::core PRIVATE lootlocker_compile_options)
+foreach(module IN LISTS LOOTLOCKER_FEATURE_MODULES)
+    if(LOOTLOCKER_MODULE_ONLY AND NOT LOOTLOCKER_MODULE_ONLY STREQUAL module)
+        continue()
+    endif()
+
+    add_library(lootlocker_${module} STATIC "src/${module}/${module}.cpp")
+    add_library(LootLocker::${module} ALIAS lootlocker_${module})
+    target_link_libraries(lootlocker_${module}
+        PUBLIC LootLocker::core
+        PRIVATE lootlocker_compile_options)
+endforeach()
 
 # ---------------------------------------------------------------------------
 # Tests and examples
@@ -82,3 +114,5 @@ endif()
 if(LOOTLOCKER_BUILD_EXAMPLES)
     add_subdirectory(examples)
 endif()
+
+

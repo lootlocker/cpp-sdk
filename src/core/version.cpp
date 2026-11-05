@@ -9,7 +9,8 @@ Version GetVersion()
 
 const char* GetVersionString()
 {
-    return "0.1.0";
+    // A string literal, so static storage with static lifetime. No allocation.
+    return LOOTLOCKER_VERSION_STRING;
 }
 
 } // namespace lootlocker
