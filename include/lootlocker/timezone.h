@@ -39,11 +39,18 @@ bool TryConvertWindowsToIana(const std::string& windows_name, std::string& out);
 
 // Convert an IANA name to a Windows name. Case-insensitive on the IANA name.
 //
-// Several IANA names map to one Windows name (Pacific/Pago_Pago and Pacific/Niue are both
-// "UTC-11"), so this is many-to-one and not a strict inverse of the above.
+// Many-to-one: several IANA names share a Windows name, so this is not a strict inverse of
+// the above. Only the IANA representatives present in the generated table are accepted —
+// the table is a Windows mapping, not the IANA database, so it holds one name per Windows
+// zone and does not carry aliases.
 bool TryConvertIanaToWindows(const std::string& iana_name, std::string& out);
 
-// True when `name` is a known IANA name in the table.
+// True when `name` looks like an IANA name: a well-formed `Area/Location` path.
+//
+// This is a shape check, not a lookup. The table is a Windows mapping rather than the IANA
+// database, so validating against it would reject real zones such as
+// `America/Argentina/Buenos_Aires` and silently fall through to UTC. The server is the
+// authority on whether a zone exists.
 bool IsKnownIanaTimezone(const std::string& name);
 
 // True when `name` is a known Windows name in the table.
@@ -84,9 +91,16 @@ public:
 
 // The default provider: reads the OS timezone.
 //
-// - Windows: `GetTimeZoneInformation`, converted through the table.
+// - Windows: `GetDynamicTimeZoneInformation`, converted through the table.
 // - Linux/macOS: the `TZ` environment variable, then `/etc/localtime`, then UTC.
 // - Anything else: UTC.
+//
+// **This is the one place the SDK reads the environment, and it is deliberate.** D9 says
+// the SDK reads no file and no environment variable on its own, because a host with its
+// own config system must not have a second one imposed on it. The OS timezone is the
+// exception that proves the rule: it is not configuration, it is the platform's answer to
+// "where is this machine", and an adopter who wants to control it injects a provider
+// instead of setting `TZ`. Nothing else in the SDK reads the environment.
 //
 // **This may not reflect what the player chose.** A game with a timezone setting should
 // inject its own provider. The SDK documents this rather than pretending the OS value is
@@ -101,6 +115,11 @@ public:
 // Order: the injected provider, then the OS, then `kDefaultIanaTimezone`. `override_value`
 // is the `Config::timezone` field: when non-empty it wins outright, because an adopter who
 // set it explicitly meant it.
-std::string ResolveTimezone(TimezoneProvider* provider, const std::string& override_value);
+//
+// Returns an empty string when `send` is false, which is how an adopter says "send no
+// timezone at all". That is a separate flag rather than an empty `override_value`, because
+// empty already means "resolve it".
+std::string ResolveTimezone(TimezoneProvider* provider, const std::string& override_value,
+                            bool send = true);
 
 } // namespace lootlocker
