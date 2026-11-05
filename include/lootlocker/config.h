@@ -18,6 +18,7 @@ namespace lootlocker {
 class Logger;
 class StateWriter;
 class IHttpTransport;
+class TimezoneProvider;
 
 // The execution queue's policy (D25). Ported from the Unreal SDK's behaviour, not its
 // shape: the values are hard-won, the mechanism is ours.
@@ -84,8 +85,19 @@ struct Config {
     StateWriter*    state_writer = nullptr;   // default is FileStateWriter
     IHttpTransport* transport    = nullptr;   // default is the libcurl one
 
-    // Empty means derive from the platform clock (D26).
+    // Empty means resolve it: the injected provider, then the OS, then Etc/UTC (D26).
+    //
+    // Set this when the game has its own timezone setting — a settings menu, a profile
+    // field, a platform API. The OS value is frequently not what the player chose.
     std::string timezone;
+
+    // Supplies the player's timezone. Not owned. Null means "use the OS".
+    //
+    // This is a seam for the same reason `state_writer` is: timezone and locale are both
+    // potentially user-configurable in a game, and every engine exposes them differently.
+    // The SDK's default reads the OS, which is right for a plain application and often
+    // wrong for a game whose player picked a timezone in a menu.
+    TimezoneProvider* timezone_provider = nullptr;
 
     QueueConfig     queue;
     RateLimitConfig rate_limit;
