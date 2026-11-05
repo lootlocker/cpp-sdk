@@ -1,0 +1,36 @@
+#pragma once
+
+// GENERATED FILE - do not edit.
+//
+// Produced by `configure_file` from cmake/version.h.in, using the version in the
+// top-level `project(LootLocker VERSION ...)` line. That line is the single source of
+// truth (D15); this header and GetVersionString() both derive from it, so they cannot
+// drift.
+
+#include <cstdint>
+
+#define LOOTLOCKER_VERSION_MAJOR @PROJECT_VERSION_MAJOR@
+#define LOOTLOCKER_VERSION_MINOR @PROJECT_VERSION_MINOR@
+#define LOOTLOCKER_VERSION_PATCH @PROJECT_VERSION_PATCH@
+
+// The full version as a string literal, e.g. "0.1.0".
+#define LOOTLOCKER_VERSION_STRING "@PROJECT_VERSION@"
+
+namespace lootlocker {
+
+struct Version {
+    int major;
+    int minor;
+    int patch;
+};
+
+// The version this build was compiled from.
+Version GetVersion();
+
+// The version as a string, e.g. "0.1.0".
+//
+// Returns a pointer to static storage with static lifetime: it does NOT allocate, and the
+// caller must not free it. Safe to call on a hot path.
+const char* GetVersionString();
+
+} // namespace lootlocker

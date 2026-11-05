@@ -29,13 +29,10 @@ jobs:
         include:
           - name: Windows / MSVC
             os: windows-latest
-            cmake_preset: msvc
           - name: Linux / GCC
             os: ubuntu-latest
-            cmake_preset: gcc
           - name: macOS / Clang
             os: macos-latest
-            cmake_preset: clang
 
     steps:
       - uses: actions/checkout@v4
@@ -46,14 +43,19 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel
 
-      - name: Tier 1 — unit tests
+      # Tier 1 and tier 2 together: the unit suites and the consumer smoke test are both
+      # registered with ctest, so this runs the consumer binary rather than only building
+      # it. A compile-only check would pass even if the program crashed on startup.
+      - name: Tier 1 + tier 2 — tests and smoke
         run: ctest --test-dir build --build-config Release --output-on-failure
-
-      - name: Tier 2 — compile-and-smoke consumer
-        run: cmake --build build --config Release --target lootlocker_consumer_auth
 
   # T8c: every module compiles on its own, so a module that quietly gains a dependency on
   # another module fails here rather than at a consumer's link step (D17).
+  #
+  # Configuring the whole project and building one target does NOT prove isolation: CMake
+  # resolves the target's link dependencies, so if auth started linking broadcasts,
+  # building auth would build broadcasts too and this job would still pass. Each module is
+  # therefore configured in a project where the other feature targets are never declared.
   module-boundary:
     name: Module boundary
     runs-on: ubuntu-latest
@@ -63,13 +65,22 @@ jobs:
       - name: Each module builds alone
         run: |
           set -e
-          for target in lootlocker_core lootlocker_auth lootlocker_broadcasts; do
-            echo "::group::building $target alone"
-            cmake -S . -B "build-$target" -DCMAKE_BUILD_TYPE=Release \
-                  -DLOOTLOCKER_BUILD_TESTS=OFF -DLOOTLOCKER_BUILD_EXAMPLES=OFF
-            cmake --build "build-$target" --target "$target" --parallel
+          for module in auth broadcasts; do
+            echo "::group::$module, with no other feature module declared"
+            cmake -S . -B "build-$module" -DCMAKE_BUILD_TYPE=Release \
+                  -DLOOTLOCKER_BUILD_TESTS=OFF -DLOOTLOCKER_BUILD_EXAMPLES=OFF \
+                  -DLOOTLOCKER_MODULE_ONLY="$module"
+            cmake --build "build-$module" --target "lootlocker_$module" --parallel
             echo "::endgroup::"
           done
+
+      - name: Core builds alone
+        run: |
+          set -e
+          cmake -S . -B build-core -DCMAKE_BUILD_TYPE=Release \
+                -DLOOTLOCKER_BUILD_TESTS=OFF -DLOOTLOCKER_BUILD_EXAMPLES=OFF \
+                -DLOOTLOCKER_MODULE_ONLY=core
+          cmake --build build-core --target lootlocker_core --parallel
 
   # T8b: nothing under include/ may reach into src/. The include path is the boundary
   # (D18), so a public header that includes a private one breaks the contract even though
@@ -84,9 +95,13 @@ jobs:
         run: |
           set -e
           # POSIX ERE, so this is the same engine as `git grep -E` and GNU `grep -E`.
-          # Verified to catch a deliberately injected violation before this landed.
+          #
+          # Two shapes are rejected:
+          #   1. a path into a private directory: core/, internal/, detail/, src/
+          #   2. a relative escape out of include/: "../src/..."
+          # The second matters because a header can reach src/ without naming it.
           if grep -rn --include='*.h' --include='*.hpp' \
-               -E '#include[[:space:]]*[<"](lootlocker/)?(core|internal|detail)/' \
+               -E '#include[[:space:]]*[<"](lootlocker/)?(core|internal|detail|src)/|#include[[:space:]]*[<"][.][.]/' \
                include/; then
             echo "::error::A public header includes a private header. See D18."
             exit 1

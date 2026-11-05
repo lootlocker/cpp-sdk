@@ -177,9 +177,11 @@ void TestFileLoaderLeavesAbsentFieldsUntouched()
 
 void TestFileLoaderParsesNestedSections()
 {
+    // A complete config, because the loader now validates before reporting success.
     Config c;
     const auto r = lootlocker::config_file::LoadFromString(
-        R"({"queue":{"max_retries":9},"rate_limit":{"enabled":false}})", c);
+        R"({"domain_key":"abc","game_key":"k","game_version":"1.0.0",)"
+        R"("queue":{"max_retries":9},"rate_limit":{"enabled":false}})", c);
 
     CHECK(r.Ok());
     CHECK_EQ_INT(c.queue.max_retries, 9);
@@ -197,6 +199,7 @@ void TestFileLoaderRejectsInvalidJson()
     CHECK_EQ(r.RawBody(), "{not json");
 }
 
+
 void TestFileLoaderRejectsWrongTypes()
 {
     Config c;
@@ -204,12 +207,48 @@ void TestFileLoaderRejectsWrongTypes()
 
     CHECK(!r.Ok());
     CHECK(r.Error().code == ErrorCode::MalformedResponse);
+    // D7: the raw body is carried on a type failure too, not only on a parse failure.
+    CHECK_EQ(r.RawBody(), R"({"domain_key":42})");
 }
 
 void TestFileLoaderRejectsNonObject()
 {
     Config c;
     const auto r = lootlocker::config_file::LoadFromString("[1,2,3]", c);
+
+    CHECK(!r.Ok());
+    CHECK(r.Error().code == ErrorCode::MalformedResponse);
+    CHECK_EQ(r.RawBody(), "[1,2,3]");
+}
+
+void TestFileLoaderCarriesRawBodyOnSuccess()
+{
+    Config c;
+    const std::string json = R"({"domain_key":"abc","game_key":"k","game_version":"1.0.0"})";
+    const auto r = lootlocker::config_file::LoadFromString(json, c);
+
+    CHECK(r.Ok());
+    CHECK_EQ(r.RawBody(), json);
+}
+
+void TestFileLoaderValidatesBeforeReportingSuccess()
+{
+    // The file parses, but the config is unusable. The contract promises InvalidConfig.
+    Config c;
+    const auto r = lootlocker::config_file::LoadFromString(
+        R"({"domain_key":"abc","game_key":"k","game_version":"not-semver"})", c);
+
+    CHECK(!r.Ok());
+    CHECK(r.Error().code == ErrorCode::InvalidConfig);
+}
+
+void TestFileLoaderRejectsOutOfRangeInteger()
+{
+    // A huge max_retries must not narrow into a plausible-looking value.
+    Config c;
+    const auto r = lootlocker::config_file::LoadFromString(
+        R"({"domain_key":"abc","game_key":"k","game_version":"1.0.0",)"
+        R"("queue":{"max_retries":99999999999999999999}})", c);
 
     CHECK(!r.Ok());
     CHECK(r.Error().code == ErrorCode::MalformedResponse);
@@ -224,6 +263,121 @@ void TestFileLoaderMissingFileIsTransportError()
     CHECK(r.Error().code == ErrorCode::Transport);
 }
 
+void TestCliTreatsFollowingFlagAsMissingValue()
+{
+    // `--domain-key --game-key xyz` must not store "--game-key" as the domain key.
+    Config c;
+    const char* argv[] = {"game", "--domain-key", "--game-key", "xyz"};
+
+    const auto r = lootlocker::config_cli::Apply(4, argv, c);
+    CHECK(!r.Ok());
+    CHECK(r.Error().code == ErrorCode::InvalidConfig);
+    CHECK_EQ(c.domain_key, "");
+}
+
+void TestSemverRejectsMalformedPrereleaseAndBuild()
+{
+    const char* bad[] = {"1.2.3-", "1.2.3+", "1.2.3-rc..1", "1.2.3-rc.", "1.2.3-rc_1",
+                         "1.2.3-01"};
+    for (const char* v : bad) {
+        Config c = MakeValid();
+        c.game_version = v;
+        CHECK(!lootlocker::ValidateConfig(c).Ok());
+    }
+}
+
+void TestSemverAcceptsValidPrereleaseAndBuild()
+{
+    const char* good[] = {"1.2.3-rc.1", "1.2.3-alpha", "1.2.3+build.5", "1.2.3-rc.1+build.5",
+                          "1.2.3-0.3.7", "1.2.3-x.7.z.92"};
+    for (const char* v : good) {
+        Config c = MakeValid();
+        c.game_version = v;
+        CHECK(lootlocker::ValidateConfig(c).Ok());
+    }
+}
+
+void TestQueuePolicyIsFullyValidated()
+{
+    {
+        Config c = MakeValid();
+        c.queue.max_retries = -1;
+        CHECK(!lootlocker::ValidateConfig(c).Ok());
+    }
+    {
+        Config c = MakeValid();
+        c.queue.request_timeout_seconds = 0;
+        CHECK(!lootlocker::ValidateConfig(c).Ok());
+    }
+    {
+        Config c = MakeValid();
+        c.queue.backoff_factor = 0;
+        CHECK(!lootlocker::ValidateConfig(c).Ok());
+    }
+    {
+        Config c = MakeValid();
+        c.queue.choke_warning_threshold = c.queue.max_queue_size + 1;
+        CHECK(!lootlocker::ValidateConfig(c).Ok());
+    }
+}
+
+void TestRateLimitPolicyIsFullyValidated()
+{
+    {
+        Config c = MakeValid();
+        c.rate_limit.seconds_per_bucket = 0;
+        CHECK(!lootlocker::ValidateConfig(c).Ok());
+    }
+    {
+        Config c = MakeValid();
+        c.rate_limit.max_requests_per_tripwire = -5;
+        CHECK(!lootlocker::ValidateConfig(c).Ok());
+    }
+    {
+        Config c = MakeValid();
+        c.rate_limit.moving_average_fraction = 1.5;
+        CHECK(!lootlocker::ValidateConfig(c).Ok());
+    }
+    {
+        Config c = MakeValid();
+        c.rate_limit.moving_average_fraction = 0.0;
+        CHECK(!lootlocker::ValidateConfig(c).Ok());
+    }
+    {
+        // A fraction that floors the derived threshold to 0 would throttle forever.
+        Config c = MakeValid();
+        c.rate_limit.moving_average_fraction = 0.001;
+        CHECK(!lootlocker::ValidateConfig(c).Ok());
+    }
+}
+
+void TestResultWorksWithNonDefaultConstructibleValue()
+{
+    // The value is stored in a union-like slot, so T does not have to be default
+    // constructible and a failed result does not construct a T.
+    struct NoDefault {
+        explicit NoDefault(int v) : value(v) {}
+        int value;
+    };
+
+    const auto ok = lootlocker::Result<NoDefault>::Ok(NoDefault(7), "body");
+    CHECK(ok.Ok());
+    CHECK_EQ_INT(ok.Value().value, 7);
+
+    const auto bad = lootlocker::Result<NoDefault>::Fail(lootlocker::Error{}, "err");
+    CHECK(!bad.Ok());
+    CHECK_EQ(bad.RawBody(), "err");
+}
+
+void TestTakeRawBodyLeavesItEmpty()
+{
+    // The postcondition is established explicitly, not assumed from the moved-from state.
+    auto r = lootlocker::Result<int>::Ok(1, "body");
+    const std::string taken = r.TakeRawBody();
+
+    CHECK_EQ(taken, "body");
+    CHECK_EQ(r.RawBody(), "");
+}
 } // namespace
 
 int main()
@@ -246,7 +400,21 @@ int main()
     TestFileLoaderRejectsInvalidJson();
     TestFileLoaderRejectsWrongTypes();
     TestFileLoaderRejectsNonObject();
+    TestFileLoaderCarriesRawBodyOnSuccess();
+    TestFileLoaderValidatesBeforeReportingSuccess();
+    TestFileLoaderRejectsOutOfRangeInteger();
     TestFileLoaderMissingFileIsTransportError();
+    TestCliTreatsFollowingFlagAsMissingValue();
+    TestSemverRejectsMalformedPrereleaseAndBuild();
+    TestSemverAcceptsValidPrereleaseAndBuild();
+    TestQueuePolicyIsFullyValidated();
+    TestRateLimitPolicyIsFullyValidated();
+    TestResultWorksWithNonDefaultConstructibleValue();
+    TestTakeRawBodyLeavesItEmpty();
 
     return testing::Report();
 }
+
+
+
+

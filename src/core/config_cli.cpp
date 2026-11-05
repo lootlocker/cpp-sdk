@@ -63,7 +63,10 @@ bool ApplyOne(const std::string& arg, const std::string& next, bool has_next, Co
     }
 
     if (!has_inline_value) {
-        if (!has_next) {
+        // A following argument that is itself a flag is not a value. Without this,
+        // `--domain-key --game-key xyz` would store "--game-key" as the domain key and
+        // silently drop "xyz".
+        if (!has_next || next.empty() || next.rfind("--", 0) == 0) {
             error = "--" + key + " needs a value";
             return false;
         }

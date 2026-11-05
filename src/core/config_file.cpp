@@ -10,9 +10,10 @@
 
 #include <nlohmann/json.hpp>
 
-#include <fstream>
-#include <sstream>
+#include <cstdio>
+#include <limits>
 #include <string>
+#include <utility>
 
 namespace lootlocker {
 namespace config_file {
@@ -61,7 +62,25 @@ bool ReadInt(const Json& j, const char* key, int& out, std::string& error)
         error = std::string("\"") + key + "\" must be an integer";
         return false;
     }
-    out = it->get<int>();
+    // is_number_integer() is also true for JSON unsigned integers, and get<int>() would
+    // narrow without a range check — a huge max_retries could wrap into a different,
+    // plausible-looking policy value. Range-check before assigning.
+    if (it->is_number_unsigned()) {
+        const auto u = it->get<std::uint64_t>();
+        if (u > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+            error = std::string("\"") + key + "\" is out of range for an int";
+            return false;
+        }
+        out = static_cast<int>(u);
+        return true;
+    }
+    const auto n = it->get<std::int64_t>();
+    if (n < static_cast<std::int64_t>(std::numeric_limits<int>::min())
+        || n > static_cast<std::int64_t>(std::numeric_limits<int>::max())) {
+        error = std::string("\"") + key + "\" is out of range for an int";
+        return false;
+    }
+    out = static_cast<int>(n);
     return true;
 }
 
@@ -118,13 +137,13 @@ bool ApplyRateLimit(const Json& j, RateLimitConfig& r, std::string& error)
            && ReadInt(*it, "moving_average_time_frames", r.moving_average_time_frames, error);
 }
 
-Result<Empty> ApplyJson(const Json& j, Config& config)
+Result<Empty> ApplyJson(const Json& j, Config& config, const std::string& raw)
 {
     if (!j.is_object()) {
         Error e;
         e.code = ErrorCode::MalformedResponse;
         e.message = "the config file must contain a JSON object";
-        return Result<Empty>::Fail(std::move(e));
+        return Result<Empty>::Fail(std::move(e), raw);
     }
 
     std::string error;
@@ -142,10 +161,17 @@ Result<Empty> ApplyJson(const Json& j, Config& config)
         Error e;
         e.code = ErrorCode::MalformedResponse;
         e.message = error;
-        return Result<Empty>::Fail(std::move(e));
+        return Result<Empty>::Fail(std::move(e), raw);
     }
 
-    return Result<Empty>::Ok(Empty{});
+    // The file parsed, but the resulting config may still be unusable. The public contract
+    // promises InvalidConfig for that case, so validate before reporting success.
+    const Error invalid = ValidateConfig(config);
+    if (!invalid.Ok()) {
+        return Result<Empty>::Fail(invalid, raw);
+    }
+
+    return Result<Empty>::Ok(Empty{}, raw);
 }
 
 } // namespace
@@ -165,25 +191,42 @@ Result<Empty> LoadFromString(const std::string& json, Config& config)
         return Result<Empty>::Fail(std::move(err), json);
     }
 
-    return ApplyJson(parsed, config);
+    // The original text is carried on every result, success or failure (D7), so an adopter
+    // can inspect what was actually in the file.
+    return ApplyJson(parsed, config, json);
 }
 
 Result<Empty> Load(const std::string& path, Config& config)
 {
-    std::ifstream file(path, std::ios::binary);
-    if (!file) {
+    // Plain C stdio rather than iostreams: the spec forbids iostreams in core, and this is
+    // the only file read in the SDK.
+    std::FILE* file = std::fopen(path.c_str(), "rb");
+    if (file == nullptr) {
         Error e;
         e.code = ErrorCode::Transport;
         e.message = "could not open the config file: " + path;
         return Result<Empty>::Fail(std::move(e));
     }
 
-    std::ostringstream buffer;
-    buffer << file.rdbuf();
-    const std::string contents = buffer.str();
+    std::string contents;
+    char chunk[4096];
+    std::size_t read = 0;
+    while ((read = std::fread(chunk, 1, sizeof(chunk), file)) > 0) {
+        contents.append(chunk, read);
+    }
+    const bool read_failed = std::ferror(file) != 0;
+    std::fclose(file);
+
+    if (read_failed) {
+        Error e;
+        e.code = ErrorCode::Transport;
+        e.message = "could not read the config file: " + path;
+        return Result<Empty>::Fail(std::move(e));
+    }
 
     return LoadFromString(contents, config);
 }
 
 } // namespace config_file
 } // namespace lootlocker
+
