@@ -22,28 +22,6 @@ bool IsNumericIdentifier(const std::string& s)
     return s.size() == 1 || s[0] != '0';
 }
 
-// A dot-separated list of numeric identifiers, at least one.
-bool IsNumericIdentifierList(const std::string& s)
-{
-    if (s.empty()) {
-        return false;
-    }
-    std::size_t i = 0;
-    while (i <= s.size()) {
-        const std::size_t dot = s.find('.', i);
-        const std::string part =
-            s.substr(i, dot == std::string::npos ? std::string::npos : dot - i);
-        if (!IsNumericIdentifier(part)) {
-            return false;
-        }
-        if (dot == std::string::npos) {
-            break;
-        }
-        i = dot + 1;
-    }
-    return true;
-}
-
 // A dot-separated list of identifiers: alphanumerics and hyphens, non-empty, no leading
 // zero on a purely numeric identifier.
 bool IsIdentifierList(const std::string& s)
