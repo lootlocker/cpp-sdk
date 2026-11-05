@@ -91,9 +91,10 @@ ctest --test-dir build --output-on-failure
 
 Two options matter when you are not just building:
 
-- `-DLOOTLOCKER_MODULE_ONLY="auth;broadcasts"` declares only those feature modules. It is a
-  list; one module is a list of one. This is how the module-boundary CI proves isolation,
-  and it is how a game names the modules it uses.
+- `-DLOOTLOCKER_MODULE_ONLY="auth;broadcasts"` declares only those feature modules. It is
+  a list; one module is a list of one. **The value must be quoted** on a POSIX shell, or
+  the `;` ends the `cmake` command and `broadcasts` runs as a separate one. This is how
+  the module-boundary CI proves isolation, and it is how a game names the modules it uses.
 - `-DLOOTLOCKER_REGENERATE_TIMEZONE=ON` regenerates `src/core/timezone_table.inc` from
   `data/windows-to-iana.tsv`. It needs Python, which is why it is off by default — an
   adopter must never need the generator. Packaging turns it on.

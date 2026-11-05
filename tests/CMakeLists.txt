@@ -30,6 +30,13 @@ add_test(NAME timezone COMMAND test_timezone)
 #
 # Registered as a test as well as built, so the smoke check actually runs the binary. A
 # compile-only check would pass even if the program crashed on startup.
-add_executable(lootlocker_consumer_auth consumer_auth.cpp)
-target_link_libraries(lootlocker_consumer_auth PRIVATE LootLocker::auth lootlocker_compile_options)
-add_test(NAME consumer_auth COMMAND lootlocker_consumer_auth)
+#
+# Gated on the module being declared: with -DLOOTLOCKER_MODULE_ONLY=core there is no
+# LootLocker::auth to link, and an unconditional link makes `cmake` fail at configure time
+# with a target-not-found error. Module-only configurations must still configure cleanly,
+# because that is how the module-boundary CI proves isolation.
+if(TARGET LootLocker::auth)
+    add_executable(lootlocker_consumer_auth consumer_auth.cpp)
+    target_link_libraries(lootlocker_consumer_auth PRIVATE LootLocker::auth lootlocker_compile_options)
+    add_test(NAME consumer_auth COMMAND lootlocker_consumer_auth)
+endif()

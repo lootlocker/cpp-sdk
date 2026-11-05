@@ -42,7 +42,8 @@ target_link_libraries(my_game PRIVATE
 
 Only what you name is compiled and linked. To declare a subset of modules without
 `add_subdirectory` deciding for you, pass
-`-DLOOTLOCKER_MODULE_ONLY="auth;broadcasts"`.
+`-DLOOTLOCKER_MODULE_ONLY="auth;broadcasts"` — quoted, because an unquoted `;` ends the
+`cmake` command on a POSIX shell.
 
 ## What is in v1
 
