@@ -176,17 +176,29 @@ jobs:
 
       # The same regeneration through CMake, which is the path packaging uses. This proves
       # the option works rather than only that the script does.
-      - name: The CMake regeneration option works
+      #
+      # The table is deliberately corrupted first. Because it is checked in, any
+      # OUTPUT-based rule is already satisfied and the build would report "no work to do"
+      # without running Python - so a step that only rebuilds an intact tree tests nothing.
+      # Corrupting it is the only way to prove the generator actually runs and repairs it.
+      - name: The CMake regeneration option repairs a stale table
         run: |
           set -e
           cmake -S . -B build-gen -DCMAKE_BUILD_TYPE=Release \
                 -DLOOTLOCKER_BUILD_TESTS=OFF -DLOOTLOCKER_BUILD_EXAMPLES=OFF \
                 -DLOOTLOCKER_REGENERATE_TIMEZONE=ON
-          rm src/core/timezone_table.inc
+          # Corrupt the table rather than deleting it: deleting proves only that the
+          # target can create a missing file, whereas corrupting proves it repairs a
+          # stale one - which is the case that a checked-in file actually hits.
+          echo '/* corrupted by CI to prove regeneration runs */' >> src/core/timezone_table.inc
           cmake --build build-gen --target lootlocker_generate_timezone
+          if grep -q 'corrupted by CI' src/core/timezone_table.inc; then
+            echo "::error::The CMake regeneration did not run; the corrupted table survived."
+            exit 1
+          fi
           if ! git diff --quiet -- src/core/timezone_table.inc; then
-            echo "::error::The CMake regeneration produced a different table than the script."
+            echo "::error::The CMake regeneration produced a different table than the committed one."
             git --no-pager diff -- src/core/timezone_table.inc
             exit 1
           fi
-          echo "the CMake regeneration option produces the same table"
+          echo "the CMake regeneration option regenerates and repairs the table"

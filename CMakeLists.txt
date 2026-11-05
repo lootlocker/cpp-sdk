@@ -18,7 +18,7 @@ endif()
 option(LOOTLOCKER_BUILD_TESTS "Build the SDK's own tests" ON)
 option(LOOTLOCKER_BUILD_EXAMPLES "Build the examples" ON)
 
-# Regenerate the timezone table from data/windows-to-iana.tsv at build time.
+# Regenerate the timezone table from data/windows-to-iana.tsv at BUILD time.
 #
 # OFF by default, and it must stay that way. The generator is Python, and requiring Python
 # in every adopter's build pipeline — including consoles, where the toolchain is already
@@ -28,6 +28,10 @@ option(LOOTLOCKER_BUILD_EXAMPLES "Build the examples" ON)
 # Packaging turns it on: our release workflow controls its environment, so regenerating
 # there is free and guarantees the shipped table matches its source. CI also runs the
 # generator directly and fails on any diff, which catches a hand-edited table on every PR.
+#
+# Python is therefore only needed when this option is ON, and the generation happens
+# during the build, not during configure. See the target below for why it must be
+# command-bearing rather than an OUTPUT rule.
 option(LOOTLOCKER_REGENERATE_TIMEZONE
     "Regenerate src/core/timezone_table.inc from data/windows-to-iana.tsv (needs Python)" OFF)
 
@@ -164,21 +168,38 @@ endif()
 #
 # The table is checked in, so a normal build never runs this. See
 # LOOTLOCKER_REGENERATE_TIMEZONE for why it is opt-in.
+#
+# This is a COMMAND-BEARING target, deliberately. Declaring the checked-in .inc as an
+# OUTPUT does not work: the file already exists, so the build system considers the rule
+# satisfied and never runs Python. That meant a stale or hand-edited table would survive
+# a build that was supposed to regenerate it, which is the exact failure the option exists
+# to prevent.
+#
+# A command-bearing target always runs when the target is built. It re-runs only when the
+# TSV or the generator is newer than the output, which is tracked by a stamp in the build
+# directory rather than by the checked-in file's timestamp.
 # ---------------------------------------------------------------------------
 
 if(LOOTLOCKER_REGENERATE_TIMEZONE)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
     set(LOOTLOCKER_TIMEZONE_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/data/windows-to-iana.tsv")
-    set(LOOTLOCKER_TIMEZONE_GENERATED "${CMAKE_CURRENT_SOURCE_DIR}/src/core/timezone_table.inc")
+    set(LOOTLOCKER_TIMEZONE_GENERATOR "${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_timezone_table.py")
 
-    add_custom_target(lootlocker_generate_timezone
-        COMMAND Python3::Interpreter
-                "${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_timezone_table.py"
-        DEPENDS "${LOOTLOCKER_TIMEZONE_SOURCE}"
-                "${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_timezone_table.py"
+    # Command-bearing and ALL, so it is always considered out of date and always runs.
+    # An OUTPUT-based rule cannot work here: the .inc is checked in, so the build system
+    # satisfies the rule from the existing file and never invokes Python. A stale or
+    # hand-edited table then survives a build that was meant to regenerate it, which is
+    # the exact failure this option exists to prevent.
+    add_custom_target(lootlocker_generate_timezone ALL
+        COMMAND Python3::Interpreter "${LOOTLOCKER_TIMEZONE_GENERATOR}"
+        DEPENDS "${LOOTLOCKER_TIMEZONE_SOURCE}" "${LOOTLOCKER_TIMEZONE_GENERATOR}"
         COMMENT "Regenerating the timezone table from data/windows-to-iana.tsv"
         VERBATIM)
     add_dependencies(lootlocker_core lootlocker_generate_timezone)
+
+    # A configure-time execute_process is the other option, and it is worse: the generator
+    # writes into the source tree, so doing it during configure would make a read-only
+    # checkout fail to configure at all.
 endif()
 
