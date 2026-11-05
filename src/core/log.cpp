@@ -95,16 +95,70 @@ std::size_t SkipString(const std::string& s, std::size_t i)
 
 // Unescape a JSON string value for comparison against the deny-list. Only the escapes that
 // can appear in a key name matter; anything else is left as-is.
-std::string UnescapeKey(const std::string& raw)
+// Decode a JSON string body into the characters it represents.
+//
+// This has to be a real decoder, not a backslash-stripper. A key written as
+// "sess\u0069on_token" is the same key as "session_token" to every JSON parser, so a
+// stripper would leave it unmatched and the token readable - a deny-list bypass that
+// costs an attacker one escape sequence.
+std::string DecodeJsonString(const std::string& raw)
 {
     std::string out;
     out.reserve(raw.size());
     for (std::size_t i = 0; i < raw.size(); ++i) {
-        if (raw[i] == '\\' && i + 1 < raw.size()) {
-            ++i;
+        if (raw[i] != '\\' || i + 1 >= raw.size()) {
             out.push_back(raw[i]);
-        } else {
-            out.push_back(raw[i]);
+            continue;
+        }
+
+        const char esc = raw[++i];
+        switch (esc) {
+            case '"':  out.push_back('"');  break;
+            case '\\': out.push_back('\\'); break;
+            case '/':  out.push_back('/') ; break;
+            case 'b':  out.push_back('\b'); break;
+            case 'f':  out.push_back('\f'); break;
+            case 'n':  out.push_back('\n'); break;
+            case 'r':  out.push_back('\r'); break;
+            case 't':  out.push_back('\t'); break;
+            case 'u': {
+                // \uXXXX. Only the BMP subset that can appear in a field name matters
+                // here; a surrogate pair cannot spell an ASCII key, so it is passed
+                // through rather than decoded.
+                if (i + 4 >= raw.size()) {
+                    out.push_back(esc);
+                    break;
+                }
+                unsigned code = 0;
+                bool valid = true;
+                for (int k = 1; k <= 4; ++k) {
+                    const char h = raw[i + static_cast<std::size_t>(k)];
+                    unsigned digit = 0;
+                    if (h >= '0' && h <= '9') {
+                        digit = static_cast<unsigned>(h - '0');
+                    } else if (h >= 'a' && h <= 'f') {
+                        digit = static_cast<unsigned>(h - 'a' + 10);
+                    } else if (h >= 'A' && h <= 'F') {
+                        digit = static_cast<unsigned>(h - 'A' + 10);
+                    } else {
+                        valid = false;
+                        break;
+                    }
+                    code = code * 16 + digit;
+                }
+                if (!valid) {
+                    out.push_back(esc);
+                    break;
+                }
+                i += 4;
+                // ASCII is what a deny-list key can be. Anything above it is emitted as
+                // a placeholder rather than encoded, because it cannot match a key.
+                out.push_back(code < 0x80 ? static_cast<char>(code) : '?') ;
+                break;
+            }
+            default:
+                out.push_back(esc);
+                break;
         }
     }
     return out;
@@ -217,8 +271,7 @@ std::string ObfuscateJson(const std::string& body, std::size_t visible_from_star
         return body;
     }
 
-    // A body with no quote cannot contain a key, and a body with no brace is not an object.
-    // Both are cheap rejections that keep a non-JSON body untouched.
+    // Cheap rejection: a body with no quote cannot contain a key.
     if (body.find('"') == std::string::npos) {
         return body;
     }
@@ -236,20 +289,41 @@ std::string ObfuscateJson(const std::string& body, std::size_t visible_from_star
 
         // A string. It is a key only if the next non-space character is ':'.
         const std::size_t string_end = SkipString(body, i);
-        const std::string raw(body, i + 1, string_end - i - (string_end > i ? 2 : 1));
+
+        // An unterminated string: SkipString returns body.size(), so the closing quote is
+        // not there to subtract. Copying the remainder verbatim is the only safe move -
+        // the arithmetic that assumed a closing quote underflows size_t and asks for an
+        // enormous string, which terminates the process in a no-exceptions build.
+        if (string_end >= body.size() || body[string_end - 1] != '"') {
+            out.append(body, i, std::string::npos);
+            break;
+        }
+
+        const std::string raw(body, i + 1, string_end - i - 2);
 
         std::size_t after = string_end;
         SkipWhitespace(body, after);
 
-        if (after < body.size() && body[after] == ':' && IsDeniedKey(UnescapeKey(raw))) {
-            out.append(body, i, string_end - i); // the key, verbatim
-            out.push_back(':');
+        if (after < body.size() && body[after] == ':' && IsDeniedKey(DecodeJsonString(raw))) {
+            // Copy the key and the separator region verbatim, so whitespace around the
+            // colon survives and the body stays byte-comparable with the original.
+            out.append(body, i, after - i + 1);
             ++after;
+            const std::size_t value_start = after;
             SkipWhitespace(body, after);
+            out.append(body, value_start, after - value_start);
 
             const std::size_t value_end = SkipValue(body, after);
             const std::string value(body, after, value_end - after);
-            out.append(Mask(value, visible_from_start, visible_from_end));
+
+            // A composite value is replaced wholesale. Applying the visible-prefix policy
+            // to an array or object would keep bytes from inside it, and those bytes can
+            // be other secrets - an array of tokens would leak its first and last.
+            if (!value.empty() && (value[0] == '[' || value[0] == '{')) {
+                out.append("\"***\"");
+            } else {
+                out.append(Mask(value, visible_from_start, visible_from_end));
+            }
             i = value_end;
             continue;
         }
@@ -288,6 +362,23 @@ std::string FormatHttpEntry(const HttpEntry& entry)
 
 } // namespace log
 
+namespace log {
+
+// The SDK's single entry point for logging an exchange.
+//
+// Obfuscation happens HERE - not in the sink, not at the call site - so a custom Logger
+// cannot receive an unmasked body and a new log statement cannot forget. The virtual
+// LogHttp is the sink; this is the dispatch in front of it.
+void LogExchange(Logger& logger, const HttpEntry& entry)
+{
+    HttpEntry safe = entry;
+    safe.request_body = ObfuscateJson(entry.request_body);
+    safe.response_body = ObfuscateJson(entry.response_body);
+    logger.LogHttp(safe);
+}
+
+} // namespace log
+
 void Logger::LogHttp(const log::HttpEntry& entry)
 {
     // The default renders a summary at Display: an exchange is diagnostic rather than a
@@ -310,3 +401,4 @@ void StderrLogger::Log(LogLevel level, const std::string& message)
 } // namespace log
 
 } // namespace lootlocker
+

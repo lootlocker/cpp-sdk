@@ -152,6 +152,15 @@ private:
     LogLevel m_minimum;
 };
 
+// Log an exchange through a logger, obfuscating both bodies first.
+//
+// **This is the only way the SDK logs an exchange.** Calling `Logger::LogHttp` directly
+// skips obfuscation, so a custom logger would receive an unmasked token. The virtual
+// `LogHttp` is the sink; this is the dispatch in front of it, and it is deliberately not
+// a member so it cannot be overridden away.
+void LogExchange(Logger& logger, const HttpEntry& entry);
+
 } // namespace log
 
 } // namespace lootlocker
+

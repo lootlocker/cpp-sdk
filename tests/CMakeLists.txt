@@ -44,3 +44,6 @@ if(TARGET LootLocker::auth)
     target_link_libraries(lootlocker_consumer_auth PRIVATE LootLocker::auth lootlocker_compile_options)
     add_test(NAME consumer_auth COMMAND lootlocker_consumer_auth)
 endif()
+
+
+

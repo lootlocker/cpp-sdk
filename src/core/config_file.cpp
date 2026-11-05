@@ -38,6 +38,30 @@ bool ReadString(const Json& j, const char* key, std::string& out, std::string& e
     return true;
 }
 
+// ASCII-only case folding, for matching a level name. std::tolower is locale-dependent
+// and takes an int, which is a footgun with signed chars.
+bool EqualsIgnoreCase(const std::string& a, const char* b)
+{
+    std::size_t i = 0;
+    for (; i < a.size(); ++i) {
+        if (b[i] == '\0') {
+            return false;
+        }
+        char ca = a[i];
+        char cb = b[i];
+        if (ca >= 'A' && ca <= 'Z') {
+            ca = static_cast<char>(ca - 'A' + 'a');
+        }
+        if (cb >= 'A' && cb <= 'Z') {
+            cb = static_cast<char>(cb - 'A' + 'a');
+        }
+        if (ca != cb) {
+            return false;
+        }
+    }
+    return b[i] == '\0';
+}
+
 bool ReadBool(const Json& j, const char* key, bool& out, std::string& error)
 {
     const auto it = j.find(key);
@@ -50,6 +74,39 @@ bool ReadBool(const Json& j, const char* key, bool& out, std::string& error)
     }
     out = it->get<bool>();
     return true;
+}
+
+// A log level, by name. Accepts the enum names case-insensitively, and a number for
+// completeness. An unknown name is an error rather than a silent default: a config that
+// says "Verbose" and gets Warning is a support ticket nobody can answer.
+bool ReadLogLevel(const Json& j, const char* key, LogLevel& out, std::string& error)
+{
+    const auto it = j.find(key);
+    if (it == j.end()) {
+        return true;
+    }
+    if (it->is_number_integer()) {
+        const int value = it->get<int>();
+        if (value < 0 || value > static_cast<int>(LogLevel::VeryVerbose)) {
+            error = std::string("\"") + key + "\" is out of range";
+            return false;
+        }
+        out = static_cast<LogLevel>(value);
+        return true;
+    }
+    if (!it->is_string()) {
+        error = std::string("\"") + key + "\" must be a string or an integer";
+        return false;
+    }
+    const std::string name = it->get<std::string>();
+    for (int level = 0; level <= static_cast<int>(LogLevel::VeryVerbose); ++level) {
+        if (EqualsIgnoreCase(name, ToString(static_cast<LogLevel>(level)))) {
+            out = static_cast<LogLevel>(level);
+            return true;
+        }
+    }
+    error = std::string("\"") + key + "\" is not a known log level: " + name;
+    return false;
 }
 
 bool ReadInt(const Json& j, const char* key, int& out, std::string& error)
@@ -154,6 +211,7 @@ Result<Empty> ApplyJson(const Json& j, Config& config, const std::string& raw)
                     && ReadBool(j, "is_development", config.is_development, error)
                     && ReadString(j, "base_url", config.base_url, error)
                     && ReadString(j, "timezone", config.timezone, error)
+                    && ReadLogLevel(j, "log_level", config.log_level, error)
                     && ApplyQueue(j, config.queue, error)
                     && ApplyRateLimit(j, config.rate_limit, error);
 

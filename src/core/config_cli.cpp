@@ -17,6 +17,30 @@ struct Flag {
 
 // Parse "--key=value" or "--key value". Returns false when the flag is recognised but has
 // no value, which is an error rather than a silent no-op.
+// ASCII-only case folding, for matching a level name. std::tolower is locale-dependent
+// and takes an int, which is a footgun with signed chars.
+bool EqualsIgnoreCase(const std::string& a, const char* b)
+{
+    std::size_t i = 0;
+    for (; i < a.size(); ++i) {
+        if (b[i] == '\0') {
+            return false;
+        }
+        char ca = a[i];
+        char cb = b[i];
+        if (ca >= 'A' && ca <= 'Z') {
+            ca = static_cast<char>(ca - 'A' + 'a');
+        }
+        if (cb >= 'A' && cb <= 'Z') {
+            cb = static_cast<char>(cb - 'A' + 'a');
+        }
+        if (ca != cb) {
+            return false;
+        }
+    }
+    return b[i] == '\0';
+}
+
 bool ApplyOne(const std::string& arg, const std::string& next, bool has_next, Config& config,
               bool& consumed_next, std::string& error)
 {
@@ -59,6 +83,25 @@ bool ApplyOne(const std::string& arg, const std::string& next, bool has_next, Co
     }
 
     if (target == nullptr) {
+        // A log level is not a string field, so it is handled before the string table.
+        if (key == "log-level") {
+            if (!has_inline_value) {
+                if (!has_next || next.empty() || next.rfind("--", 0) == 0) {
+                    error = "--log-level needs a value";
+                    return false;
+                }
+                value = next;
+                consumed_next = true;
+            }
+            for (int level = 0; level <= static_cast<int>(LogLevel::VeryVerbose); ++level) {
+                if (EqualsIgnoreCase(value, ToString(static_cast<LogLevel>(level)))) {
+                    config.log_level = static_cast<LogLevel>(level);
+                    return true;
+                }
+            }
+            error = "--log-level is not a known level: " + value;
+            return false;
+        }
         return true;   // unknown flag; ignore, because the host has its own flags
     }
 
