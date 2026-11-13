@@ -120,6 +120,7 @@ add_library(lootlocker_core STATIC
     src/core/timezone.cpp
     src/core/log.cpp
     src/core/text.cpp
+    src/core/config_obfuscation.cpp
 )
 add_library(LootLocker::core ALIAS lootlocker_core)
 

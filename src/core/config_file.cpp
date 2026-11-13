@@ -6,6 +6,7 @@
 // handle's implementation — not a breaking change for adopters.
 
 #include <lootlocker/config_file.h>
+#include <lootlocker/config_obfuscation.h>
 #include "text.h"
 #include <lootlocker/result.h>
 
@@ -213,22 +214,40 @@ Result<Empty> ApplyJson(const Json& j, Config& config, const std::string& raw)
 
 Result<Empty> LoadFromString(const std::string& json, Config& config)
 {
-    // Non-throwing parse: the third argument `allow_exceptions = false` makes the library
-    // return a discarded value instead of throwing. This matters because the SDK is built
-    // with exceptions disabled (D7) — a try/catch here would not even compile cleanly
-    // under /EHs-c-.
+    // A file is either plain JSON or obfuscated (D26). Try JSON first, because that is the
+    // common case and a JSON document is never valid Base64 - it contains braces and
+    // quotes. If it does not parse, try deobfuscating and parse the result.
     const Json parsed = Json::parse(json, nullptr, /*allow_exceptions=*/false);
 
-    if (parsed.is_discarded()) {
+    if (!parsed.is_discarded()) {
+        return ApplyJson(parsed, config, json);
+    }
+
+    // Not JSON. If it is not Base64 either, say so plainly rather than reporting a
+    // Base64 complaint about a file the adopter thought was JSON.
+    if (!config_obfuscation::IsValidBase64(json)) {
         Error err;
         err.code = ErrorCode::MalformedResponse;
-        err.message = "the config file is not valid JSON";
+        err.message = "the config file is neither valid JSON nor obfuscated Base64";
         return Result<Empty>::Fail(std::move(err), json);
     }
 
-    // The original text is carried on every result, success or failure (D7), so an adopter
-    // can inspect what was actually in the file.
-    return ApplyJson(parsed, config, json);
+    Result<std::string> plain = config_obfuscation::Deobfuscate(json);
+    if (!plain.Ok()) {
+        return Result<Empty>::Fail(plain.Error(), json);
+    }
+
+    const Json reparsed = Json::parse(plain.Value(), nullptr, /*allow_exceptions=*/false);
+    if (reparsed.is_discarded()) {
+        Error err;
+        err.code = ErrorCode::MalformedResponse;
+        err.message = "the config file decoded but is not valid JSON";
+        return Result<Empty>::Fail(std::move(err), json);
+    }
+
+    // The raw body carried on the result is the decoded JSON, not the Base64: an adopter
+    // inspecting a failure wants to see what the config actually said.
+    return ApplyJson(reparsed, config, plain.Value());
 }
 
 Result<Empty> Load(const std::string& path, Config& config)
