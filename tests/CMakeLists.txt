@@ -25,6 +25,10 @@ add_executable(test_timezone test_timezone.cpp)
 target_link_libraries(test_timezone PRIVATE LootLocker::core lootlocker_compile_options)
 add_test(NAME timezone COMMAND test_timezone)
 
+add_executable(test_transport test_transport.cpp)
+target_link_libraries(test_transport PRIVATE LootLocker::core lootlocker_compile_options)
+add_test(NAME transport COMMAND test_transport)
+
 add_executable(test_config_obfuscation test_config_obfuscation.cpp)
 target_link_libraries(test_config_obfuscation PRIVATE LootLocker::core lootlocker_compile_options)
 add_test(NAME config_obfuscation COMMAND test_config_obfuscation)

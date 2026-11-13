@@ -17,6 +17,24 @@ endif()
 
 option(LOOTLOCKER_BUILD_TESTS "Build the SDK's own tests" ON)
 option(LOOTLOCKER_BUILD_EXAMPLES "Build the examples" ON)
+option(LOOTLOCKER_BUILD_EXAMPLES "Build the examples" ON)
+
+# The libcurl transport (D3).
+#
+# ON by default, but a missing curl is not an error: a console adopter injects its own
+# transport and must not be forced to build curl, and a studio that vendors dependencies
+# itself may already have one. When curl is absent the SDK still builds and the default
+# transport is simply unavailable, which the client reports rather than crashing on.
+option(LOOTLOCKER_WITH_CURL "Build the libcurl transport when curl is available" ON)
+
+if(LOOTLOCKER_WITH_CURL)
+    find_package(CURL QUIET)
+    if(CURL_FOUND)
+        message(STATUS "libcurl ${CURL_VERSION_STRING} found: the default transport is available")
+    else()
+        message(STATUS "libcurl not found: the default transport is unavailable, inject your own")
+    endif()
+endif()
 
 # Regenerate the timezone table from data/windows-to-iana.tsv at BUILD time.
 #
@@ -121,7 +139,17 @@ add_library(lootlocker_core STATIC
     src/core/log.cpp
     src/core/text.cpp
     src/core/config_obfuscation.cpp
+    src/core/header_map.cpp
 )
+
+# The curl transport is only compiled when curl was found. The header guards on the same
+# macro, so an adopter without curl gets a clean build and no dangling declaration.
+if(CURL_FOUND)
+    target_sources(lootlocker_core PRIVATE src/core/curl_http_transport.cpp)
+    target_link_libraries(lootlocker_core PRIVATE CURL::libcurl)
+    target_compile_definitions(lootlocker_core PRIVATE LOOTLOCKER_HAVE_CURL)
+endif()
+
 add_library(LootLocker::core ALIAS lootlocker_core)
 
 target_include_directories(lootlocker_core
