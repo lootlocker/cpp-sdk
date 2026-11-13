@@ -245,9 +245,10 @@ Result<Empty> LoadFromString(const std::string& json, Config& config)
         return Result<Empty>::Fail(std::move(err), json);
     }
 
-    // The raw body carried on the result is the decoded JSON, not the Base64: an adopter
-    // inspecting a failure wants to see what the config actually said.
-    return ApplyJson(reparsed, config, plain.Value());
+    // The raw body is the file's original text, not the decoded JSON. The contract in
+    // config_file.h promises what was actually in the file, and an adopter can decode
+    // Base64 themselves but cannot recover the original bytes once we replace them.
+    return ApplyJson(reparsed, config, json);
 }
 
 Result<Empty> Load(const std::string& path, Config& config)

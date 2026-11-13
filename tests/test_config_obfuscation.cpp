@@ -190,19 +190,34 @@ void TestBase64ThatIsNotAConfigIsReported()
     CHECK(result.Error().code == lootlocker::ErrorCode::MalformedResponse);
 }
 
-void TestRawBodyCarriesTheDecodedJson()
+void TestRawBodyCarriesTheOriginalFileText()
 {
     using lootlocker::config_obfuscation::Obfuscate;
 
-    // An adopter inspecting a failure wants the config that was actually read, not the
-    // Base64 wrapper.
+    // The contract in config_file.h: RawBody() is what was actually in the file. For an
+    // obfuscated file that is the Base64, not the decoded JSON - an adopter can decode
+    // Base64 themselves, but cannot recover the original bytes once we replace them.
     const std::string plain = "{\"domain_key\":\"d\",\"game_version\":\"not-semver\"}";
+    const std::string obfuscated = Obfuscate(plain);
+
     lootlocker::Config config;
-    const auto result = lootlocker::config_file::LoadFromString(Obfuscate(plain), config);
+    const auto result = lootlocker::config_file::LoadFromString(obfuscated, config);
 
     CHECK(!result.Ok());
-    CHECK(result.RawBody().find("not-semver") != std::string::npos);
-    CHECK(result.RawBody().find('{') != std::string::npos);
+    CHECK_EQ(result.RawBody(), obfuscated);
+    // And specifically not the decoded JSON.
+    CHECK(result.RawBody().find("not-semver") == std::string::npos);
+}
+
+void TestRawBodyCarriesThePlainJson()
+{
+    // The same contract on the plain path, so the two forms agree.
+    const std::string plain = "{\"domain_key\":\"d\",\"game_version\":\"not-semver\"}";
+    lootlocker::Config config;
+    const auto result = lootlocker::config_file::LoadFromString(plain, config);
+
+    CHECK(!result.Ok());
+    CHECK_EQ(result.RawBody(), plain);
 }
 
 } // namespace
@@ -220,7 +235,8 @@ int main()
     TestObfuscatedConfigLoads();
     TestNeitherJsonNorBase64IsReportedClearly();
     TestBase64ThatIsNotAConfigIsReported();
-    TestRawBodyCarriesTheDecodedJson();
+    TestRawBodyCarriesTheOriginalFileText();
+    TestRawBodyCarriesThePlainJson();
 
     return testing::Report();
 }
