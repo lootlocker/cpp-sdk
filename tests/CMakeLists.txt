@@ -25,6 +25,10 @@ add_executable(test_timezone test_timezone.cpp)
 target_link_libraries(test_timezone PRIVATE LootLocker::core lootlocker_compile_options)
 add_test(NAME timezone COMMAND test_timezone)
 
+add_executable(test_config_obfuscation test_config_obfuscation.cpp)
+target_link_libraries(test_config_obfuscation PRIVATE LootLocker::core lootlocker_compile_options)
+add_test(NAME config_obfuscation COMMAND test_config_obfuscation)
+
 add_executable(test_text test_text.cpp)
 target_link_libraries(test_text PRIVATE LootLocker::core lootlocker_compile_options)
 # core::text is internal, so src/ is not on the adopter's include path. A test that
@@ -51,6 +55,7 @@ if(TARGET LootLocker::auth)
     target_link_libraries(lootlocker_consumer_auth PRIVATE LootLocker::auth lootlocker_compile_options)
     add_test(NAME consumer_auth COMMAND lootlocker_consumer_auth)
 endif()
+
 
 
 
