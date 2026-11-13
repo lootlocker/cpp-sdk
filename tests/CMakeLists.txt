@@ -25,6 +25,13 @@ add_executable(test_timezone test_timezone.cpp)
 target_link_libraries(test_timezone PRIVATE LootLocker::core lootlocker_compile_options)
 add_test(NAME timezone COMMAND test_timezone)
 
+add_executable(test_text test_text.cpp)
+target_link_libraries(test_text PRIVATE LootLocker::core lootlocker_compile_options)
+# core::text is internal, so src/ is not on the adopter's include path. A test that
+# exercises it has to reach in deliberately.
+target_include_directories(test_text PRIVATE ${CMAKE_SOURCE_DIR}/src/core)
+add_test(NAME text COMMAND test_text)
+
 add_executable(test_log test_log.cpp)
 target_link_libraries(test_log PRIVATE LootLocker::core lootlocker_compile_options)
 add_test(NAME log COMMAND test_log)

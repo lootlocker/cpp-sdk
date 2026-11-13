@@ -1,4 +1,5 @@
 #include <lootlocker/timezone.h>
+#include "text.h"
 
 #include <algorithm>
 #include <cctype>
@@ -37,27 +38,6 @@ const TimezonePair kWindowsToIana[] = {
 
 constexpr std::size_t kPairCount = sizeof(kWindowsToIana) / sizeof(kWindowsToIana[0]);
 
-// ASCII-only case folding. Timezone names are ASCII, and std::tolower is locale-dependent
-// and takes an int, which is a footgun with signed chars.
-char LowerAscii(char c)
-{
-    return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
-}
-
-bool EqualsIgnoreCase(const std::string& a, const char* b)
-{
-    std::size_t i = 0;
-    for (; i < a.size(); ++i) {
-        if (b[i] == '\0') {
-            return false;
-        }
-        if (LowerAscii(a[i]) != LowerAscii(b[i])) {
-            return false;
-        }
-    }
-    return b[i] == '\0';
-}
-
 } // namespace
 
 bool TryConvertWindowsToIana(const std::string& windows_name, std::string& out)
@@ -66,7 +46,7 @@ bool TryConvertWindowsToIana(const std::string& windows_name, std::string& out)
         return false;
     }
     for (std::size_t i = 0; i < kPairCount; ++i) {
-        if (EqualsIgnoreCase(windows_name, kWindowsToIana[i].windows)) {
+        if (core::text::EqualsIgnoreCase(windows_name, kWindowsToIana[i].windows)) {
             out = kWindowsToIana[i].iana;
             return true;
         }
@@ -82,7 +62,7 @@ bool TryConvertIanaToWindows(const std::string& iana_name, std::string& out)
     // Many-to-one: several IANA names share a Windows name, so the first match wins. The
     // table is ordered so the canonical IANA name for each Windows zone comes first.
     for (std::size_t i = 0; i < kPairCount; ++i) {
-        if (EqualsIgnoreCase(iana_name, kWindowsToIana[i].iana)) {
+        if (core::text::EqualsIgnoreCase(iana_name, kWindowsToIana[i].iana)) {
             out = kWindowsToIana[i].windows;
             return true;
         }

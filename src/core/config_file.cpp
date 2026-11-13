@@ -6,6 +6,7 @@
 // handle's implementation — not a breaking change for adopters.
 
 #include <lootlocker/config_file.h>
+#include "text.h"
 #include <lootlocker/result.h>
 
 #include <nlohmann/json.hpp>
@@ -36,30 +37,6 @@ bool ReadString(const Json& j, const char* key, std::string& out, std::string& e
     }
     out = it->get<std::string>();
     return true;
-}
-
-// ASCII-only case folding, for matching a level name. std::tolower is locale-dependent
-// and takes an int, which is a footgun with signed chars.
-bool EqualsIgnoreCase(const std::string& a, const char* b)
-{
-    std::size_t i = 0;
-    for (; i < a.size(); ++i) {
-        if (b[i] == '\0') {
-            return false;
-        }
-        char ca = a[i];
-        char cb = b[i];
-        if (ca >= 'A' && ca <= 'Z') {
-            ca = static_cast<char>(ca - 'A' + 'a');
-        }
-        if (cb >= 'A' && cb <= 'Z') {
-            cb = static_cast<char>(cb - 'A' + 'a');
-        }
-        if (ca != cb) {
-            return false;
-        }
-    }
-    return b[i] == '\0';
 }
 
 bool ReadBool(const Json& j, const char* key, bool& out, std::string& error)
@@ -100,7 +77,7 @@ bool ReadLogLevel(const Json& j, const char* key, LogLevel& out, std::string& er
     }
     const std::string name = it->get<std::string>();
     for (int level = 0; level <= static_cast<int>(LogLevel::VeryVerbose); ++level) {
-        if (EqualsIgnoreCase(name, ToString(static_cast<LogLevel>(level)))) {
+        if (core::text::EqualsIgnoreCase(name, ToString(static_cast<LogLevel>(level)))) {
             out = static_cast<LogLevel>(level);
             return true;
         }
