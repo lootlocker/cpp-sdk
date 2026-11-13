@@ -7,6 +7,7 @@
 // model was silently dropped by a round-trip.
 
 #include <lootlocker/log.h>
+#include "text.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -46,21 +47,6 @@ std::vector<std::string>& DenyList()
     static std::vector<std::string> list(kDeniedKeys,
                                          kDeniedKeys + sizeof(kDeniedKeys) / sizeof(kDeniedKeys[0]));
     return list;
-}
-
-char LowerAscii(char c)
-{
-    return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
-}
-
-std::string Lower(const std::string& s)
-{
-    std::string out;
-    out.reserve(s.size());
-    for (std::size_t i = 0; i < s.size(); ++i) {
-        out.push_back(LowerAscii(s[i]));
-    }
-    return out;
 }
 
 void SkipWhitespace(const std::string& s, std::size_t& i)
@@ -236,7 +222,7 @@ std::size_t DeniedKeyCount()
 
 bool IsDeniedKey(const std::string& key)
 {
-    const std::string lowered = Lower(key);
+    const std::string lowered = core::text::Lower(key);
     const std::vector<std::string>& list = DenyList();
     for (std::size_t i = 0; i < list.size(); ++i) {
         if (list[i] == lowered) {
@@ -251,7 +237,7 @@ void AddDeniedKey(const std::string& key)
     if (key.empty()) {
         return;
     }
-    const std::string lowered = Lower(key);
+    const std::string lowered = core::text::Lower(key);
     std::vector<std::string>& list = DenyList();
     if (std::find(list.begin(), list.end(), lowered) == list.end()) {
         list.push_back(lowered);
