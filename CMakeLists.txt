@@ -142,12 +142,18 @@ add_library(lootlocker_core STATIC
     src/core/header_map.cpp
 )
 
-# The curl transport is only compiled when curl was found. The header guards on the same
-# macro, so an adopter without curl gets a clean build and no dangling declaration.
-if(CURL_FOUND)
+# The curl transport is only compiled when curl was found AND the option is on. Both
+# conditions matter: CURL_FOUND can already be true in a parent project or a reused
+# configure, so gating on it alone would ignore the documented opt-out.
+#
+# LOOTLOCKER_HAVE_CURL is PUBLIC, not PRIVATE. The public header guards on it, so a
+# consumer that includes `curl_http_transport.h` has to see the same value the library was
+# built with - otherwise the class is undeclared for the adopter even though it exists in
+# the binary, and the documented default transport cannot be constructed.
+if(LOOTLOCKER_WITH_CURL AND CURL_FOUND)
     target_sources(lootlocker_core PRIVATE src/core/curl_http_transport.cpp)
     target_link_libraries(lootlocker_core PRIVATE CURL::libcurl)
-    target_compile_definitions(lootlocker_core PRIVATE LOOTLOCKER_HAVE_CURL)
+    target_compile_definitions(lootlocker_core PUBLIC LOOTLOCKER_HAVE_CURL)
 endif()
 
 add_library(LootLocker::core ALIAS lootlocker_core)

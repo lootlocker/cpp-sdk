@@ -60,6 +60,13 @@ public:
     //
     // Called once per `Update()`. A transport that has nothing to report returns false
     // immediately; it must never wait for the network here.
+    //
+    // **DNS is the one documented exception, and it is the default transport's.** curl's
+    // default resolver is synchronous, so the first `Poll` for a hostname that is not
+    // already cached can block for the length of the lookup. The transfer itself is
+    // pollable; the name resolution is not. A game that cannot tolerate that should
+    // resolve once at startup, or inject a transport whose resolver is asynchronous.
+    // Pretending otherwise would be a promise this implementation cannot keep.
     virtual bool Poll(TransferId id, Response& out) = 0;
 
     // Cancels and releases. Called on timeout, on client destruction, and after `Poll`

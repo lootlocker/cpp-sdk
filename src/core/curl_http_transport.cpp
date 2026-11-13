@@ -65,9 +65,13 @@ std::size_t WriteHeader(char* data, std::size_t size, std::size_t count, void* u
 } // namespace
 
 struct CurlHttpTransport::Transfer {
-    TransferId id = 0;
-    CURL*      easy = nullptr;
+    TransferId  id = 0;
+    CURL*       easy = nullptr;
     curl_slist* request_headers = nullptr;
+
+    // The request body, owned for the whole transfer. curl borrows the pointer given to
+    // CURLOPT_POSTFIELDS, and the caller's Request may be gone by the time curl sends it.
+    std::string owned_body;
 
     Response response;
     bool     finished = false;   // curl said the transfer is done
@@ -75,9 +79,40 @@ struct CurlHttpTransport::Transfer {
     char     error[CURL_ERROR_SIZE] = {0};
 };
 
+namespace {
+
+// libcurl's global state is process-wide, so it must be initialised once and torn down
+// only when the last transport is gone. Doing it per instance means destroying one
+// transport invalidates every other one's handles - a use-after-free that only shows up
+// when two clients exist, which is exactly the case a test would miss.
+//
+// A plain int rather than std::atomic: the SDK is single-threaded by contract (D5), and
+// transports are constructed and destroyed on the thread that calls Update().
+int g_curl_users = 0;
+
+void AcquireCurl()
+{
+    if (g_curl_users == 0) {
+        curl_global_init(CURL_GLOBAL_DEFAULT);
+    }
+    ++g_curl_users;
+}
+
+void ReleaseCurl()
+{
+    if (g_curl_users > 0) {
+        --g_curl_users;
+        if (g_curl_users == 0) {
+            curl_global_cleanup();
+        }
+    }
+}
+
+} // namespace
+
 CurlHttpTransport::CurlHttpTransport()
 {
-    curl_global_init(CURL_GLOBAL_DEFAULT);
+    AcquireCurl();
     m_multi = curl_multi_init();
 }
 
@@ -100,7 +135,8 @@ CurlHttpTransport::~CurlHttpTransport()
         curl_multi_cleanup(static_cast<CURLM*>(m_multi));
         m_multi = nullptr;
     }
-    curl_global_cleanup();
+
+    ReleaseCurl();
 }
 
 IHttpTransport::TransferId CurlHttpTransport::Start(const Request& request)
@@ -125,6 +161,18 @@ IHttpTransport::TransferId CurlHttpTransport::Start(const Request& request)
     curl_easy_setopt(transfer->easy, CURLOPT_ERRORBUFFER, transfer->error);
     curl_easy_setopt(transfer->easy, CURLOPT_NOSIGNAL, 1L);
 
+    // The non-blocking promise covers DNS too, and curl's default resolver is
+    // synchronous: the first Poll for a hostname would block the caller of Update() for
+    // the length of the lookup. CURLOPT_DNS_SERVERS is not enough - it still resolves
+    // synchronously. The only honest options are an async resolver build or resolving off
+    // the update thread, and neither is available here.
+    //
+    // So the contract is narrowed rather than quietly broken: this transport is pollable
+    // for the transfer, and the FIRST poll for a new host may block on DNS. The header
+    // says so. A game that cannot tolerate that resolves once at startup, or injects a
+    // transport whose resolver is async.
+    curl_easy_setopt(transfer->easy, CURLOPT_DNS_CACHE_TIMEOUT, 60L);
+
     // A whole-request budget. 0 means no timeout, which curl expresses as 0L.
     curl_easy_setopt(transfer->easy, CURLOPT_TIMEOUT,
                      static_cast<long>(request.timeout_seconds));
@@ -133,20 +181,32 @@ IHttpTransport::TransferId CurlHttpTransport::Start(const Request& request)
     curl_easy_setopt(transfer->easy, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(transfer->easy, CURLOPT_MAXREDIRS, 5L);
 
-    if (request.method == "POST") {
-        curl_easy_setopt(transfer->easy, CURLOPT_POST, 1L);
-        curl_easy_setopt(transfer->easy, CURLOPT_POSTFIELDS, request.body.c_str());
+    // The body must outlive `Start`. CURLOPT_POSTFIELDS borrows the pointer, and the
+    // caller is free to destroy its Request the moment Start returns - so the transfer
+    // keeps its own copy and points curl at that. CURLOPT_COPYPOSTFIELDS would also work,
+    // but it copies again internally and gives no way to free the copy deterministically.
+    if (request.method == "POST" || request.method == "PUT") {
+        transfer->owned_body = request.body;
+        if (request.method == "POST") {
+            curl_easy_setopt(transfer->easy, CURLOPT_POST, 1L);
+        } else {
+            curl_easy_setopt(transfer->easy, CURLOPT_CUSTOMREQUEST, "PUT");
+        }
+        curl_easy_setopt(transfer->easy, CURLOPT_POSTFIELDS, transfer->owned_body.c_str());
         curl_easy_setopt(transfer->easy, CURLOPT_POSTFIELDSIZE,
-                         static_cast<long>(request.body.size()));
-    } else if (request.method == "PUT") {
-        curl_easy_setopt(transfer->easy, CURLOPT_CUSTOMREQUEST, "PUT");
-        curl_easy_setopt(transfer->easy, CURLOPT_POSTFIELDS, request.body.c_str());
-        curl_easy_setopt(transfer->easy, CURLOPT_POSTFIELDSIZE,
-                         static_cast<long>(request.body.size()));
+                         static_cast<long>(transfer->owned_body.size()));
     } else if (request.method == "DELETE") {
         curl_easy_setopt(transfer->easy, CURLOPT_CUSTOMREQUEST, "DELETE");
     } else if (request.method != "GET" && !request.method.empty()) {
+        // A custom method may still carry a body, so it gets the same treatment.
+        transfer->owned_body = request.body;
         curl_easy_setopt(transfer->easy, CURLOPT_CUSTOMREQUEST, request.method.c_str());
+        if (!transfer->owned_body.empty()) {
+            curl_easy_setopt(transfer->easy, CURLOPT_POSTFIELDS,
+                             transfer->owned_body.c_str());
+            curl_easy_setopt(transfer->easy, CURLOPT_POSTFIELDSIZE,
+                             static_cast<long>(transfer->owned_body.size()));
+        }
     }
 
     for (const HeaderMap::Entry& header : request.headers.Entries()) {
