@@ -39,6 +39,24 @@ jobs:
         with:
           submodules: recursive
 
+      # libcurl is the default transport (D3). Installing it means the curl path is
+      # actually compiled and exercised on every target, rather than being dead code that
+      # only a downstream adopter discovers is broken.
+      - name: Install libcurl
+        shell: bash
+        run: |
+          set -e
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            brew install curl
+          else
+            # windows-latest does NOT ship curl development files, only the CLI. vcpkg is
+            # the supported way to get headers and a lib on the runner.
+            vcpkg install curl:x64-windows
+            echo "CMAKE_TOOLCHAIN_FILE=$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" >> "$GITHUB_ENV"
+          fi
+
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 
@@ -65,6 +83,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      # The transport is part of core, so this job needs curl too - otherwise it would
+      # silently build a core without the default transport and prove less than it claims.
+      - name: Install libcurl
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
 
       - name: Each module builds alone
         run: |
