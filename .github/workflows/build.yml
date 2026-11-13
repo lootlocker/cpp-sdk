@@ -51,8 +51,10 @@ jobs:
           elif [ "$RUNNER_OS" = "macOS" ]; then
             brew install curl
           else
-            # windows-latest ships curl headers and libs with the runner image.
-            echo "using the runner-provided curl"
+            # windows-latest does NOT ship curl development files, only the CLI. vcpkg is
+            # the supported way to get headers and a lib on the runner.
+            vcpkg install curl:x64-windows
+            echo "CMAKE_TOOLCHAIN_FILE=$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" >> "$GITHUB_ENV"
           fi
 
       - name: Configure
