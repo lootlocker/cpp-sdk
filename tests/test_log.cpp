@@ -11,6 +11,7 @@
 #include "test_harness.h"
 
 #include <string>
+#include <memory>
 #include <vector>
 
 namespace {
@@ -286,18 +287,36 @@ void TestDefaultLogHttpFallsBackToText()
 void TestConfigCarriesTheSeam()
 {
     lootlocker::Config config;
-    CHECK(config.logger == nullptr); // default is the SDK's stderr logger
+    CHECK(config.logger.expired()); // default is the SDK's stderr logger
     CHECK(config.log_level == lootlocker::LogLevel::Warning);
 
-    RecordingLogger logger;
-    config.logger = &logger;
+    // The seam is a weak_ptr: the adopter owns the logger, the SDK observes it.
+    auto logger = std::make_shared<RecordingLogger>();
+    config.logger = logger;
     config.log_level = lootlocker::LogLevel::VeryVerbose;
-    CHECK(config.logger == &logger);
+
+    std::shared_ptr<lootlocker::Logger> locked = config.logger.lock();
+    CHECK(locked != nullptr);
+    CHECK(locked.get() == logger.get());
     CHECK(config.log_level == lootlocker::LogLevel::VeryVerbose);
 
     // NoLogging is how a shipped game silences the SDK without swapping the logger.
     config.log_level = lootlocker::LogLevel::NoLogging;
     CHECK(config.log_level == lootlocker::LogLevel::NoLogging);
+}
+
+void TestAnExpiredSeamIsDetectable()
+{
+    // The whole point of weak_ptr: the adopter's object dying is observable rather than
+    // a dangling dereference. This is the case a raw pointer could not express.
+    lootlocker::Config config;
+    {
+        auto logger = std::make_shared<RecordingLogger>();
+        config.logger = logger;
+        CHECK(!config.logger.expired());
+    }
+    CHECK(config.logger.expired());
+    CHECK(config.logger.lock() == nullptr);
 }
 
 } // namespace
@@ -429,6 +448,7 @@ int main()
     TestHttpEntryReachesTheCustomLogger();
     TestDefaultLogHttpFallsBackToText();
     TestConfigCarriesTheSeam();
+    TestAnExpiredSeamIsDetectable();
     TestUnicodeEscapedKeysAreMasked();
     TestCompositeValueIsReplacedWholesale();
     TestUnterminatedStringDoesNotUnderflow();
