@@ -17,7 +17,6 @@ endif()
 
 option(LOOTLOCKER_BUILD_TESTS "Build the SDK's own tests" ON)
 option(LOOTLOCKER_BUILD_EXAMPLES "Build the examples" ON)
-option(LOOTLOCKER_BUILD_EXAMPLES "Build the examples" ON)
 
 # The libcurl transport (D3).
 #
