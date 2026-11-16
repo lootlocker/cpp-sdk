@@ -177,9 +177,17 @@ IHttpTransport::TransferId CurlHttpTransport::Start(const Request& request)
     curl_easy_setopt(transfer->easy, CURLOPT_TIMEOUT,
                      static_cast<long>(request.timeout_seconds));
 
-    // Redirects are followed, because the API may move a domain. A cap prevents a loop.
-    curl_easy_setopt(transfer->easy, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(transfer->easy, CURLOPT_MAXREDIRS, 5L);
+    // Redirects are NOT followed, deliberately.
+    //
+    // curl does not scope custom headers to the origin: with FOLLOWLOCATION on, every
+    // header in the caller's list is replayed to whatever host the Location header names.
+    // The SDK sends `x-session-token`, so a redirect to an attacker-controlled host would
+    // hand over the session - and a redirect to http:// would do it in clear text.
+    //
+    // The API does not redirect in normal operation, so the cost of refusing is a clear
+    // error instead of a silent credential leak. A caller that genuinely needs redirects
+    // can follow them itself, where it can decide which headers survive the hop.
+    curl_easy_setopt(transfer->easy, CURLOPT_FOLLOWLOCATION, 0L);
 
     // The body must outlive `Start`. CURLOPT_POSTFIELDS borrows the pointer, and the
     // caller is free to destroy its Request the moment Start returns - so the transfer
