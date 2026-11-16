@@ -1,0 +1,78 @@
+#pragma once
+
+// The client (D5, D20). The only object an adopter owns.
+//
+// It is not a singleton, it starts no thread, and it exposes no feature methods: modules
+// are namespaces of free functions that take it (D19). Constructing one starts nothing;
+// requests move only when someone calls `Update()`.
+
+#include <lootlocker/config.h>
+#include <lootlocker/result.h>
+
+#include <memory>
+
+namespace lootlocker {
+
+class Client;
+
+namespace core {
+class Executor;
+
+// The internal access point a module uses to reach the queue.
+//
+// Declared here rather than in a `src/` header because a module target has to be able to
+// name it, and a module may include `core`'s internals (D18). An adopter cannot use it:
+// `src/` is not on their include path, so the definition is unreachable even though the
+// declaration is visible.
+//
+// This is the seam `core::Send<Definition>()` is built on (T13). It is not test
+// scaffolding.
+Executor& GetExecutor(Client& client);
+} // namespace core
+
+class Client {
+public:
+    // Validates the config and throws nothing: a bad config is reported through
+    // `ConfigError()`, because a constructor cannot return a `Result` and the SDK does not
+    // throw (D7).
+    //
+    // A client with an invalid config is inert: `Update()` returns false, every request is
+    // rejected with `InvalidConfig`, and nothing is sent. That is deliberate - a game that
+    // ships a bad config gets a clear error in its log rather than a crash at startup.
+    explicit Client(const Config& config);
+    ~Client();
+
+    Client(const Client&)            = delete;   // one owner, no copies
+    Client& operator=(const Client&) = delete;
+
+    // Drives the queue. Returns false when nothing is in flight and nothing is queued.
+    //
+    // Does a frame's worth of work, not one item: it polls, retries, promotes and delivers
+    // in one call. Callbacks fire here, on the calling thread (D5).
+    bool Update();
+
+    // The config the client was built with, after validation.
+    const Config& GetConfig() const;
+
+    // Empty when the config was usable. Set when it was not, and the client is inert.
+    const Error& ConfigError() const;
+
+    // Replaces the transport. The client observes it through a `weak_ptr`, so the adopter
+    // keeps ownership and a transport that dies is detected rather than dereferenced.
+    void SetTransport(std::weak_ptr<IHttpTransport> transport);
+
+    // The transport in use, for a test or a wrapper that needs to inspect it. Empty when
+    // the client has none, which happens when curl was not built in and nothing was
+    // injected.
+    std::weak_ptr<IHttpTransport> GetTransport() const;
+
+private:
+    // The correct form: the function is declared in `core` above, so the friend
+    // declaration names it qualified rather than declaring a new one in this scope.
+    friend core::Executor& core::GetExecutor(Client& client);
+
+    struct Impl;
+    std::unique_ptr<Impl> m_impl;
+};
+
+} // namespace lootlocker
