@@ -162,7 +162,20 @@ public:
             return;
         }
 
-        // Closing the listening socket unblocks `accept` on every platform we target.
+        // `shutdown` before `close`, and this is not belt-and-braces: on Linux, closing a
+        // listening socket does NOT unblock a thread already blocked in `accept()`, so
+        // `join()` below would hang for ever. Windows and macOS do unblock it, which is
+        // exactly why this only showed up on one of the three CI targets.
+        //
+        // `shutdown` on a listening socket makes the pending `accept` return, which is the
+        // portable way to wake it.
+        if (m_listen >= 0) {
+#if defined(_WIN32)
+            ::shutdown(static_cast<SOCKET>(m_listen), SD_BOTH);
+#else
+            ::shutdown(static_cast<int>(m_listen), SHUT_RDWR);
+#endif
+        }
         CloseListen();
 
         if (m_thread.joinable()) {

@@ -69,6 +69,12 @@ if(WIN32)
 endif()
 add_test(NAME transport_e2e COMMAND test_transport_e2e)
 
+# A timeout on every test, so a hang fails the job instead of blocking CI until someone
+# notices. This is not hypothetical: the loopback server's `Stop()` hung on Linux because
+# closing a listening socket does not unblock `accept()` there, and the job sat in the test
+# step for twenty minutes before anyone could see why.
+set_tests_properties(transport_e2e executor PROPERTIES TIMEOUT 120)
+
 # Tier 2 (D14): a tiny consumer that links only one module, proving the target graph and
 # the headers work from outside the library. It deliberately does NOT link broadcasts.
 #
