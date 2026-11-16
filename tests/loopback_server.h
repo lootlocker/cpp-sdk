@@ -121,7 +121,9 @@ public:
 
         sockaddr_in address{};
         address.sin_family = AF_INET;
-        address.sin_addr.s_addr = ::htonl(INADDR_LOOPBACK);
+        // Not `::htonl`: on macOS these are macros (`__DARWIN_OSSwapInt32`), and a macro
+        // expansion cannot be qualified with `::`.
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         address.sin_port = 0;   // ephemeral
 
         if (::bind(static_cast<int>(m_listen), reinterpret_cast<sockaddr*>(&address),
@@ -142,7 +144,7 @@ public:
             CloseListen();
             return false;
         }
-        m_port = ::ntohs(bound.sin_port);
+        m_port = ntohs(bound.sin_port);
 
         if (::listen(static_cast<int>(m_listen), 8) != 0) {
             CloseListen();
@@ -363,8 +365,14 @@ private:
     }
 
     std::intptr_t m_listen = -1;
-    int          m_port = 0;
-    bool         m_wsa_started = false;
+    int           m_port = 0;
+
+    // Windows-only: WSAStartup has to be paired with WSACleanup. Guarded rather than left
+    // unguarded because clang warns about an unused private field, and a warning in the
+    // test suite is a warning someone will eventually silence by deleting the field.
+#if defined(_WIN32)
+    bool m_wsa_started = false;
+#endif
 
     std::atomic<bool> m_running{false};
     std::thread       m_thread;
