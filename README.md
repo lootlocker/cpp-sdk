@@ -45,6 +45,59 @@ Only what you name is compiled and linked. To declare a subset of modules withou
 `-DLOOTLOCKER_MODULE_ONLY="auth;broadcasts"` — quoted, because an unquoted `;` ends the
 `cmake` command on a POSIX shell.
 
+## Driving it
+
+Constructing a `Client` starts no thread and opens no socket. Requests move only when
+someone calls `Update()`, which does a frame's worth of work and returns `false` when
+nothing is in flight and nothing is queued:
+
+```cpp
+lootlocker::Config cfg;
+cfg.domain_key   = "1g9glch3";
+cfg.game_key     = "prod_1c52468fc6e8420c955e3b6c303ea8cc";
+cfg.game_version = "1.2.1";
+
+lootlocker::Client ll(cfg);
+
+// In your loop, once per frame:
+ll.Update();
+```
+
+`Update()` polls in-flight transfers, applies the retry policy, promotes queued requests
+under the concurrency cap, and delivers callbacks — all in one call, on the calling thread.
+A `while (ll.Update())` loop therefore terminates once the last callback has fired, which is
+what lets a program with no host loop exit.
+
+A bad config does not throw and does not crash. `Client::ConfigError()` reports it, and the
+client is inert: `Update()` returns `false` and nothing is ever sent.
+
+### The queue's policy
+
+`QueueConfig` is public and per-client, because a slow platform or a tight memory budget
+needs different numbers:
+
+| Field | Default | What it does |
+| --- | --- | --- |
+| `max_retries` | 5 | Retries after the first attempt |
+| `initial_backoff_ms` | 50 | First delay; doubles each retry |
+| `backoff_factor` | 2 | Multiplier per retry |
+| `max_in_flight` | 50 | Concurrent transfers |
+| `max_queue_size` | 5000 | Queued requests before the queue is "full" |
+| `choke_warning_threshold` | 500 | When to warn that the queue is backing up |
+| `request_timeout_seconds` | 300 | Whole-request budget |
+| `deny_when_backed_up` | true | Reject on a full queue instead of stalling |
+
+The retry policy, which is the part that bites:
+
+- **Retried:** 5xx, 429, and a transport failure (no response at all).
+- **Not retried:** any other 4xx. A 400 will be a 400 again.
+- **`Retry-After` is obeyed exactly** when the server sends one, instead of guessing.
+- **A non-idempotent request whose response was lost is never retried.** A POST that timed
+  out may have succeeded, and retrying it can double-grant. A 5xx on a POST *is* retried,
+  because the server told us it failed. This is set per request with
+  `PendingRequest::idempotent`, which defaults to `true` — every write must opt out
+  deliberately.
+
 ## The transport
 
 The SDK never calls the network directly. Everything goes through `IHttpTransport`, and the

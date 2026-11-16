@@ -44,6 +44,31 @@ add_executable(test_log test_log.cpp)
 target_link_libraries(test_log PRIVATE LootLocker::core lootlocker_compile_options)
 add_test(NAME log COMMAND test_log)
 
+# The executor's state machine. Driven by a fake clock and the public fake transport, so
+# nothing sleeps and every timing assertion is exact.
+#
+# `src/core` is on the include path because the executor is internal (D18): an adopter
+# cannot reach it, and a test that exercises it has to reach in deliberately.
+add_executable(test_executor test_executor.cpp)
+target_link_libraries(test_executor PRIVATE LootLocker::core lootlocker_compile_options)
+target_include_directories(test_executor PRIVATE ${CMAKE_SOURCE_DIR}/src/core)
+add_test(NAME executor COMMAND test_executor)
+
+# The end-to-end transport test (T11, owner 2026-11-13): a real round trip through the real
+# curl transport against a loopback server, plus the proof that `Config::transport` is
+# actually consulted.
+#
+# The loopback server needs the platform socket library, which is why this target links
+# ws2_32 on Windows. The curl half is compiled only when curl was built in; the injection
+# half always runs.
+add_executable(test_transport_e2e test_transport_e2e.cpp)
+target_link_libraries(test_transport_e2e PRIVATE LootLocker::core lootlocker_compile_options)
+target_include_directories(test_transport_e2e PRIVATE ${CMAKE_SOURCE_DIR}/src/core)
+if(WIN32)
+    target_link_libraries(test_transport_e2e PRIVATE ws2_32)
+endif()
+add_test(NAME transport_e2e COMMAND test_transport_e2e)
+
 # Tier 2 (D14): a tiny consumer that links only one module, proving the target graph and
 # the headers work from outside the library. It deliberately does NOT link broadcasts.
 #
