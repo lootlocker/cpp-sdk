@@ -12,6 +12,7 @@
 #include <lootlocker/result.h>
 
 #include <cstdint>
+#include <memory>
 #include <string>
 
 namespace lootlocker {
@@ -58,8 +59,20 @@ struct RateLimitConfig {
 
 // The only runtime input.
 //
-// A plain aggregate, so a game fills it directly. The injection pointers are not owned;
-// null means "use the SDK default".
+// A plain aggregate, so a game fills it directly.
+//
+// **The four injection seams are `weak_ptr`, not raw pointers.** The adopter owns their
+// logger, state writer, transport and timezone provider; the SDK only observes them. A
+// `weak_ptr` says exactly that, and it makes the dangerous case detectable: if the
+// adopter's object dies while the client is still alive, `lock()` returns null and the
+// SDK logs it and fails gracefully instead of dereferencing freed memory.
+//
+// The cost is that an injected object must be owned by a `shared_ptr`. A stack object
+// cannot be observed this way, which is the price of the safety.
+//
+// `weak_ptr` rather than `shared_ptr` deliberately: a `shared_ptr` member would keep the
+// object alive for the client's lifetime, which is ownership, not observation - and it
+// would make the expiry check dead code.
 struct Config {
     // Required. There is no host to talk to without a domain key: the base URL is
     // https://<domain_key>.api.lootlocker.com.
@@ -80,10 +93,10 @@ struct Config {
     // Empty means derive from `domain_key`.
     std::string base_url;
 
-    // Optional overrides. Not owned. Null means "use the SDK default".
-    Logger*         logger       = nullptr;   // default writes to stderr
-    StateWriter*    state_writer = nullptr;   // default is FileStateWriter
-    IHttpTransport* transport    = nullptr;   // default is the libcurl one
+    // Optional overrides. Empty means "use the SDK default".
+    std::weak_ptr<Logger>         logger;            // default writes to stderr
+    std::weak_ptr<StateWriter>    state_writer;      // default is FileStateWriter
+    std::weak_ptr<IHttpTransport> transport;         // default is the libcurl one
 
     // The least-verbose level the SDK emits (D26).
     //
@@ -99,13 +112,13 @@ struct Config {
     // field, a platform API. The OS value is frequently not what the player chose.
     std::string timezone;
 
-    // Supplies the player's timezone. Not owned. Null means "use the OS".
+    // Supplies the player's timezone. Empty means "use the OS".
     //
     // This is a seam for the same reason `state_writer` is: timezone and locale are both
     // potentially user-configurable in a game, and every engine exposes them differently.
     // The SDK's default reads the OS, which is right for a plain application and often
     // wrong for a game whose player picked a timezone in a menu.
-    TimezoneProvider* timezone_provider = nullptr;
+    std::weak_ptr<TimezoneProvider> timezone_provider;
 
     // False means send no timezone at all, so the server treats the player as UTC.
     //

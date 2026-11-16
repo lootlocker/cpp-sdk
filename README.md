@@ -104,21 +104,31 @@ dead code.
 
 ### Overriding it
 
-Implement the interface and hand it to `Config`:
+Implement the interface, own it with a `shared_ptr`, and hand the SDK a `weak_ptr`:
 
 ```cpp
 class MyTransport : public lootlocker::IHttpTransport {
     // Start / Poll / Cancel
 };
 
-MyTransport transport;
+auto transport = std::make_shared<MyTransport>();
 
 lootlocker::Config config;
-config.transport = &transport;   // not owned; must outlive the client
+config.transport = transport;   // weak_ptr: you own it, the SDK observes it
 ```
 
 The SDK uses it for every request. This is the seam a console uses: Sony and Nintendo ship
 their own HTTP stacks, and curl needs porting to them.
+
+**Why `weak_ptr` and not a raw pointer.** The adopter owns the object; the SDK only
+observes it. A raw pointer would express that in a comment and nothing more, so an object
+destroyed before the client would be a dangling dereference. With a `weak_ptr` the SDK
+`lock()`s it per use, and if the object is gone it logs the fact and fails the call
+gracefully instead of reading freed memory.
+
+**The cost:** an injected object must be owned by a `shared_ptr`. A stack object cannot be
+observed this way. That is the price of the safety, and it is why the example above
+allocates.
 
 `FakeHttpTransport` in `<lootlocker/fake_http_transport.h>` is a scriptable implementation
 for tests. Transfers complete only when you say so, which makes the pollable contract
