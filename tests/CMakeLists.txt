@@ -64,6 +64,13 @@ add_test(NAME executor COMMAND test_executor)
 add_executable(test_transport_e2e test_transport_e2e.cpp)
 target_link_libraries(test_transport_e2e PRIVATE LootLocker::core lootlocker_compile_options)
 target_include_directories(test_transport_e2e PRIVATE ${CMAKE_SOURCE_DIR}/src/core)
+
+# The loopback server runs on its own thread, so this target needs the platform's thread
+# library. On Windows that is ws2_32; on POSIX it is Threads::Threads, which is not folded
+# into libc everywhere (glibc before 2.34 needs -lpthread explicitly). Linking only the
+# socket library would fail to link on those toolchains.
+find_package(Threads REQUIRED)
+target_link_libraries(test_transport_e2e PRIVATE Threads::Threads)
 if(WIN32)
     target_link_libraries(test_transport_e2e PRIVATE ws2_32)
 endif()

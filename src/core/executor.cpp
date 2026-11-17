@@ -47,14 +47,35 @@ Executor::Executor(const QueueConfig& config, std::weak_ptr<IHttpTransport> tran
 {
 }
 
+Executor::Executor(const QueueConfig& config, std::weak_ptr<IHttpTransport> transport,
+                   Clock& clock, std::weak_ptr<Logger> logger, Error config_error)
+    : m_config(config), m_config_error(std::move(config_error)), m_transport(std::move(transport)),
+      m_clock(clock), m_logger(std::move(logger))
+{
+}
+
 Executor::~Executor()
 {
     Abandon();
 }
 
-void Executor::SetTransport(std::weak_ptr<IHttpTransport> transport)
+bool Executor::SetTransport(std::weak_ptr<IHttpTransport> transport)
 {
+    // Refused while anything is in flight. An in-flight entry holds only a transfer id,
+    // which means nothing to a different transport: swapping underneath would poll and
+    // cancel that id on the new one, and the old transfer would never be cancelled. The
+    // caller drains first, because only the caller knows whether waiting is acceptable.
+    if (InFlightCount() > 0) {
+        if (std::shared_ptr<Logger> logger = m_logger.lock()) {
+            logger->Log(LogLevel::Warning,
+                        "SetTransport was refused: requests are still in flight, so the "
+                        "current transport cannot be replaced yet");
+        }
+        return false;
+    }
+
     m_transport = std::move(transport);
+    return true;
 }
 
 std::weak_ptr<IHttpTransport> Executor::GetTransport() const
@@ -94,26 +115,86 @@ std::int64_t Executor::BackoffMs(int attempts, const Completion& completion) con
     // A server that told us when to come back is obeyed exactly. Guessing at a back-off
     // when the server has stated the answer is how a client gets itself rate limited
     // harder.
-    if (completion.error.retry_after_seconds > 0) {
+    //
+    // `>= 0` rather than `> 0`: `Retry-After: 0` is a valid instruction to retry
+    // immediately, and treating it as absent would apply the exponential back-off instead.
+    // The field is only set when the header was present, so 0 here means "the server said
+    // zero", not "no header".
+    if (completion.error.retry_after_seconds >= 0 && completion.error.retry_after_present) {
         return static_cast<std::int64_t>(completion.error.retry_after_seconds) * 1000;
     }
 
     // initial * factor^(attempts-1), capped so a long retry chain cannot overflow into a
-    // negative delay. The cap is a day, which is far beyond any sane back-off and exists
-    // only to keep the arithmetic total.
+    // negative delay.
+    //
+    // The cap is checked BEFORE the multiplication, not after. Checking afterwards is
+    // undefined behaviour rather than a late clamp: a large enough `backoff_factor` or
+    // retry count overflows signed `int64_t` on the multiply itself, and the compiler is
+    // entitled to assume that never happens.
     std::int64_t delay = m_config.initial_backoff_ms;
     for (int i = 1; i < attempts; ++i) {
-        delay *= m_config.backoff_factor;
-        if (delay > 86400000) {
-            return 86400000;
+        if (m_config.backoff_factor <= 0) {
+            return kMaxBackoffMs;
         }
+        if (delay > kMaxBackoffMs / m_config.backoff_factor) {
+            return kMaxBackoffMs;
+        }
+        delay *= m_config.backoff_factor;
     }
-    return delay;
+    return delay > kMaxBackoffMs ? kMaxBackoffMs : delay;
+}
+
+void Executor::ParseRetryAfter(const std::string& value, Error& error)
+{
+    // `Retry-After` is server-controlled input, so it is not trusted to be small. The
+    // accumulator is 64-bit and checked against the public field's range before narrowing:
+    // a header of "99999999999999999999" would otherwise overflow a signed `int` on the
+    // multiply, which is undefined behaviour and can produce a negative delay.
+    std::int64_t seconds = 0;
+    bool any_digit = false;
+
+    for (const char c : value) {
+        if (c < '0' || c > '9') {
+            // Not a delay-seconds value. The HTTP-date form is legal but we do not parse
+            // it, so it is treated as absent rather than guessed at.
+            return;
+        }
+        any_digit = true;
+        if (seconds > (2147483647 - (c - '0')) / 10) {
+            // Clamp rather than reject: the server asked us to wait a very long time, and
+            // waiting the maximum we can represent is closer to obeying than ignoring it.
+            error.retry_after_seconds = 2147483647;
+            error.retry_after_present = true;
+            return;
+        }
+        seconds = seconds * 10 + (c - '0');
+    }
+
+    if (!any_digit) {
+        return;
+    }
+
+    error.retry_after_seconds = static_cast<int>(seconds);
+    error.retry_after_present = true;
 }
 
 std::uint64_t Executor::Submit(PendingRequest request, CompletionHandler on_done)
 {
     const std::int64_t now = m_clock.NowMs();
+
+    // An invalid config rejects everything, and the handler still runs - on the next
+    // `Update()`, like every other rejection, because callbacks fire from `Update()` (D5).
+    // Silently dropping the handler would leave a caller waiting for a callback that never
+    // comes.
+    if (!m_config_error.Ok()) {
+        if (on_done) {
+            Completion completion;
+            completion.error = m_config_error;
+            m_rejected.push_back(
+                [handler = std::move(on_done), completion]() { handler(completion); });
+        }
+        return 0;
+    }
 
     // The queue is full. `deny_when_backed_up` decides whether that is an error or a wait:
     // a game that would rather stall than drop a request leaves it false and the request
@@ -219,15 +300,7 @@ void Executor::FinishOrRetry(std::uint64_t id, Completion completion, std::int64
     // retry decision rather than after.
     std::string retry_after;
     if (completion.headers.Get("Retry-After", retry_after)) {
-        int seconds = 0;
-        for (const char c : retry_after) {
-            if (c < '0' || c > '9') {
-                seconds = 0;
-                break;
-            }
-            seconds = seconds * 10 + (c - '0');
-        }
-        completion.error.retry_after_seconds = seconds;
+        ParseRetryAfter(retry_after, completion.error);
     }
 
     // --- Retry or deliver -------------------------------------------------------------
@@ -292,7 +365,17 @@ bool Executor::Update()
     // Collected first, then processed, because `FinishOrRetry` erases from `m_entries` and
     // a handler may submit. Iterating the map while either happens is the bug this
     // two-step exists to avoid.
-    std::vector<std::uint64_t> finished;
+    //
+    // The response is kept here rather than re-polled in phase 2. `IHttpTransport::Poll` is
+    // documented as "called once per Update()", and a transport is entitled to consume its
+    // completion on the first poll - so polling again would lose the response and report an
+    // empty result.
+    struct Finished {
+        std::uint64_t             id = 0;
+        IHttpTransport::Response  response;
+    };
+
+    std::vector<Finished>      finished;
     std::vector<std::uint64_t> timed_out;
 
     for (auto& pair : m_entries) {
@@ -309,33 +392,32 @@ bool Executor::Update()
             continue;
         }
 
-        IHttpTransport::Response response;
-        if (transport->Poll(entry.transfer, response)) {
-            finished.push_back(entry.id);
+        Finished done;
+        done.id = entry.id;
+        if (transport->Poll(entry.transfer, done.response)) {
+            finished.push_back(std::move(done));
         }
     }
 
     // --- Phase 2: collect completions -------------------------------------------------
 
-    for (const std::uint64_t id : finished) {
-        const auto it = m_entries.find(id);
+    for (Finished& done : finished) {
+        const auto it = m_entries.find(done.id);
         if (it == m_entries.end()) {
             continue;
         }
         Entry& entry = it->second;
 
-        IHttpTransport::Response response;
-        transport->Poll(entry.transfer, response);
         transport->Cancel(entry.transfer);
 
         Completion completion;
-        completion.status_code = response.status_code;
-        completion.headers = std::move(response.headers);
-        completion.body = std::move(response.body);
+        completion.status_code = done.response.status_code;
+        completion.headers = std::move(done.response.headers);
+        completion.body = std::move(done.response.body);
         completion.attempts = entry.attempts;
 
         LogAttempt(entry, completion, now - entry.started_at_ms);
-        FinishOrRetry(id, std::move(completion), now, handlers, completions);
+        FinishOrRetry(done.id, std::move(completion), now, handlers, completions);
     }
 
     for (const std::uint64_t id : timed_out) {

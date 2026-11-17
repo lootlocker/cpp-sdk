@@ -59,7 +59,11 @@ public:
 
     // Replaces the transport. The client observes it through a `weak_ptr`, so the adopter
     // keeps ownership and a transport that dies is detected rather than dereferenced.
-    void SetTransport(std::weak_ptr<IHttpTransport> transport);
+    //
+    // Returns false when the replacement was refused because requests are still in flight.
+    // An in-flight transfer id is meaningful only to the transport that issued it, so
+    // swapping underneath would strand the old transfer. Drain first, then replace.
+    bool SetTransport(std::weak_ptr<IHttpTransport> transport);
 
     // The transport in use, for a test or a wrapper that needs to inspect it. Empty when
     // the client has none, which happens when curl was not built in and nothing was

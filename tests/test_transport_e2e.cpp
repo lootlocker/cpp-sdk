@@ -220,7 +220,6 @@ void TestInjectedTransportIsUsedByTheClient()
     // The client reports the injected transport, not a default.
     CHECK(!client.GetTransport().expired());
     CHECK(client.GetTransport().lock() == fake);
-
     int delivered = 0;
     core::Completion last;
     core::PendingRequest request;
@@ -265,7 +264,7 @@ void TestSetTransportReplacesTheInjectedOne()
     config.transport = first;
 
     Client client(config);
-    client.SetTransport(second);
+    CHECK(client.SetTransport(second));
 
     CHECK(client.GetTransport().lock() == second);
 
@@ -291,8 +290,25 @@ void TestInvalidConfigMakesTheClientInert()
     CHECK(!client.ConfigError().Ok());
     CHECK(client.ConfigError().code == ErrorCode::InvalidConfig);
 
-    // Inert: Update reports nothing to do and nothing is ever sent.
+    // Inert: nothing is ever sent.
     CHECK(!client.Update());
+    CHECK_EQ_INT(static_cast<long long>(fake->StartCount()), 0);
+
+    // But a submission is still answered rather than silently dropped. A caller waiting for
+    // a callback that never comes is worse than a clear error.
+    int delivered = 0;
+    core::Completion last;
+    core::PendingRequest request;
+    request.method = "GET";
+    request.url = "http://127.0.0.1:1/x";
+    core::GetExecutor(client).Submit(request, [&](const core::Completion& completion) {
+        ++delivered;
+        last = completion;
+    });
+
+    CHECK(!client.Update());
+    CHECK_EQ_INT(delivered, 1);
+    CHECK(last.error.code == ErrorCode::InvalidConfig);
     CHECK_EQ_INT(static_cast<long long>(fake->StartCount()), 0);
 }
 

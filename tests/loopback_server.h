@@ -162,25 +162,19 @@ public:
             return;
         }
 
-        // `shutdown` before `close`, and this is not belt-and-braces: on Linux, closing a
-        // listening socket does NOT unblock a thread already blocked in `accept()`, so
-        // `join()` below would hang for ever. Windows and macOS do unblock it, which is
-        // exactly why this only showed up on one of the three CI targets.
-        //
-        // `shutdown` on a listening socket makes the pending `accept` return, which is the
-        // portable way to wake it.
-        if (m_listen >= 0) {
-#if defined(_WIN32)
-            ::shutdown(static_cast<SOCKET>(m_listen), SD_BOTH);
-#else
-            ::shutdown(static_cast<int>(m_listen), SHUT_RDWR);
-#endif
-        }
-        CloseListen();
+        // Wake the blocked `accept` with a real connection rather than by closing the
+        // socket underneath it. Closing a listening socket from another thread is not a
+        // portable way to interrupt `accept`: on Linux it does not interrupt it at all, and
+        // on platforms where it does, the thread may still be using the descriptor when it
+        // is invalidated. A self-connection is the portable wake-up, and it also removes the
+        // data race on `m_listen`.
+        WakeAccept();
 
         if (m_thread.joinable()) {
             m_thread.join();
         }
+
+        CloseListen();
 
 #if defined(_WIN32)
         if (m_wsa_started) {
@@ -219,6 +213,29 @@ public:
     }
 
 private:
+    // Connect to ourselves so the blocked `accept` returns. The accepted connection is
+    // closed immediately by `Run`, which sees `m_running` false and exits.
+    void WakeAccept()
+    {
+        const std::intptr_t wake = static_cast<std::intptr_t>(::socket(AF_INET, SOCK_STREAM, 0));
+        if (wake < 0) {
+            return;
+        }
+
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_port = htons(static_cast<unsigned short>(m_port));
+
+        ::connect(static_cast<int>(wake), reinterpret_cast<sockaddr*>(&address), sizeof(address));
+
+#if defined(_WIN32)
+        ::closesocket(static_cast<SOCKET>(wake));
+#else
+        ::close(static_cast<int>(wake));
+#endif
+    }
+
     void CloseListen()
     {
         if (m_listen >= 0) {
@@ -237,7 +254,18 @@ private:
             const std::intptr_t client =
                 static_cast<std::intptr_t>(::accept(static_cast<int>(m_listen), nullptr, nullptr));
             if (client < 0) {
-                // Either we are shutting down or the accept failed; both mean stop.
+                // The accept failed; stop rather than spin on a broken listener.
+                break;
+            }
+
+            // The wake-up connection from `Stop()`. Nothing is read from it: the flag is
+            // already false, so the loop exits and the socket is closed below.
+            if (!m_running.load()) {
+#if defined(_WIN32)
+                ::closesocket(static_cast<SOCKET>(client));
+#else
+                ::close(static_cast<int>(client));
+#endif
                 break;
             }
 
