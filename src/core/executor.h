@@ -71,6 +71,11 @@ class Executor {
 public:
     Executor(const QueueConfig& config, std::weak_ptr<IHttpTransport> transport, Clock& clock,
              std::weak_ptr<Logger> logger);
+
+    // The same, plus the config error the client found. A non-empty error makes every
+    // submission reject with it, which is how an inert client still delivers its handlers.
+    Executor(const QueueConfig& config, std::weak_ptr<IHttpTransport> transport, Clock& clock,
+             std::weak_ptr<Logger> logger, Error config_error);
     ~Executor();
 
     Executor(const Executor&)            = delete;
@@ -90,7 +95,14 @@ public:
 
     // Replaces the transport. The executor holds a `weak_ptr` and locks it per use, so a
     // transport that dies mid-flight is detected rather than dereferenced.
-    void SetTransport(std::weak_ptr<IHttpTransport> transport);
+    //
+    // **Refused while anything is in flight**, and returns false when it refuses. An
+    // in-flight entry holds only a transfer id, which is meaningful to the transport that
+    // issued it and to no other: swapping the transport underneath would poll and cancel
+    // that id on the new one, and the old transfer would never be cancelled. Draining
+    // first is the caller's job, because only the caller knows whether waiting is
+    // acceptable.
+    bool SetTransport(std::weak_ptr<IHttpTransport> transport);
 
     // The transport in use. Empty when the client has none, which happens when curl was
     // not built in and nothing was injected.
@@ -128,6 +140,10 @@ private:
                        std::vector<CompletionHandler>& out_handlers,
                        std::vector<Completion>& out_completions);
 
+    // Parse a `Retry-After` header into `error.retry_after_seconds`, clamping rather than
+    // overflowing. Server-controlled input, so it is not trusted to be small.
+    static void ParseRetryAfter(const std::string& value, Error& error);
+
     void Deliver(std::vector<CompletionHandler>& handlers, std::vector<Completion>& completions);
 
     void DrainRejected();
@@ -139,7 +155,12 @@ private:
     std::int64_t TimeoutMs() const;
     std::int64_t BackoffMs(int attempts, const Completion& completion) const;
 
+    // The longest delay a back-off may produce. A day is far beyond any sane back-off and
+    // exists only to keep the arithmetic total.
+    static constexpr std::int64_t kMaxBackoffMs = 86400000;
+
     QueueConfig                    m_config;
+    Error                          m_config_error;
     std::weak_ptr<IHttpTransport>  m_transport;
     Clock&                         m_clock;
     std::weak_ptr<Logger>          m_logger;

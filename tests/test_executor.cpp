@@ -479,7 +479,7 @@ void TestSetTransportReplacesTheSeam()
     Fixture f;
 
     auto replacement = std::make_shared<FakeHttpTransport>();
-    f.executor->SetTransport(replacement);
+    CHECK(f.executor->SetTransport(replacement));
 
     f.executor->Submit(Get("https://example.test/a"), [](const Completion&) {});
     CHECK(f.executor->Update());
@@ -487,6 +487,33 @@ void TestSetTransportReplacesTheSeam()
     // The new transport received it, and the old one did not.
     CHECK_EQ_INT(static_cast<long long>(replacement->StartCount()), 1);
     CHECK_EQ_INT(static_cast<long long>(f.transport->StartCount()), 0);
+}
+
+void TestSetTransportIsRefusedWhileInFlight()
+{
+    Fixture f;
+
+    f.executor->Submit(Get("https://example.test/a"), [](const Completion&) {});
+    CHECK(f.executor->Update());
+    CHECK_EQ_INT(static_cast<long long>(f.executor->InFlightCount()), 1);
+
+    // An in-flight transfer id means nothing to a different transport, so replacing it now
+    // would strand the old transfer. Refused, and said so.
+    auto replacement = std::make_shared<FakeHttpTransport>();
+    CHECK(!f.executor->SetTransport(replacement));
+
+    bool warned = false;
+    for (const std::string& message : f.logger->messages) {
+        if (message.find("SetTransport was refused") != std::string::npos) {
+            warned = true;
+        }
+    }
+    CHECK(warned);
+
+    // Once drained, the replacement is accepted.
+    f.transport->Complete(f.transport->Order().back(), 200, "{}");
+    CHECK(!f.executor->Update());
+    CHECK(f.executor->SetTransport(replacement));
 }
 
 // --- Logging ---------------------------------------------------------------------------
@@ -521,6 +548,123 @@ void TestEachAttemptIsLoggedAndObfuscated()
     // when the body is empty for the wrong reason.
     CHECK(entry.response_body.find("abcdef1234567890") == std::string::npos);
     CHECK(entry.response_body.find("abc") != std::string::npos);
+}
+
+void TestRetryAfterZeroRetriesImmediately()
+{
+    Fixture f;
+
+    const std::uint64_t id =
+        f.executor->Submit(Get("https://example.test/a"), [](const Completion&) {});
+
+    CHECK(f.executor->Update());
+
+    IHttpTransport::Response response;
+    response.status_code = 429;
+    response.body = "{}";
+    // A valid instruction to retry immediately. Treating it as "no header" would apply the
+    // 50 ms exponential back-off instead, which is not what the server asked for.
+    response.headers.Set("Retry-After", "0");
+    f.transport->Complete(id, response);
+
+    // No clock advance at all, and the retry is already due.
+    CHECK(f.executor->Update());
+    CHECK_EQ_INT(static_cast<long long>(f.transport->StartCount()), 2);
+}
+
+void TestHugeRetryAfterIsClampedNotOverflowed()
+{
+    Fixture f;
+
+    const std::uint64_t id =
+        f.executor->Submit(Get("https://example.test/a"), [](const Completion&) {});
+
+    CHECK(f.executor->Update());
+
+    IHttpTransport::Response response;
+    response.status_code = 429;
+    response.body = "{}";
+    // Server-controlled input, so it is not trusted to be small. This overflows a signed
+    // int on the multiply if the accumulator is not checked.
+    response.headers.Set("Retry-After", "99999999999999999999");
+    f.transport->Complete(id, response);
+
+    // Clamped to the largest representable delay rather than wrapping negative. A negative
+    // delay would make the retry due immediately, which is the opposite of obeying.
+    CHECK(f.executor->Update());
+    CHECK_EQ_INT(static_cast<long long>(f.transport->StartCount()), 1);
+
+    f.clock.Advance(1000);
+    CHECK(f.executor->Update());
+    CHECK_EQ_INT(static_cast<long long>(f.transport->StartCount()), 1);
+}
+
+void TestLargeBackoffFactorDoesNotOverflow()
+{
+    QueueConfig config = DefaultQueue();
+    config.max_retries = 40;
+    config.backoff_factor = 1000000;   // absurd, but a config field is adopter input
+    config.initial_backoff_ms = 1000000;
+    Fixture f(config);
+
+    const std::uint64_t id =
+        f.executor->Submit(Get("https://example.test/a"), [](const Completion&) {});
+
+    CHECK(f.executor->Update());
+    f.transport->Complete(id, 503, "unavailable");
+    f.executor->Update();
+
+    // The first delay is already 1,000,000 ms, so a second is not enough.
+    f.clock.Advance(1000);
+    CHECK(f.executor->Update());
+    CHECK_EQ_INT(static_cast<long long>(f.transport->StartCount()), 1);
+
+    // The point of the test: the delay is capped at a day and stays positive. Without the
+    // pre-multiplication cap, the multiply overflows signed int64 and the delay goes
+    // negative, which would make the retry due immediately - the opposite of a back-off.
+    f.clock.Advance(86400000);
+    CHECK(f.executor->Update());
+    CHECK_EQ_INT(static_cast<long long>(f.transport->StartCount()), 2);
+
+    // And it keeps working rather than wrapping: another failure, another capped delay.
+    f.transport->Complete(f.transport->Order().back(), 503, "unavailable");
+    f.executor->Update();
+    f.clock.Advance(86400000);
+    CHECK(f.executor->Update());
+    CHECK_EQ_INT(static_cast<long long>(f.transport->StartCount()), 3);
+}
+
+void TestInvalidConfigRejectsThroughUpdate()
+{
+    // An inert client still has to deliver its handlers, or a caller waits for a callback
+    // that never comes.
+    Error config_error;
+    config_error.code = ErrorCode::InvalidConfig;
+    config_error.message = "domain_key is required";
+
+    auto transport = std::make_shared<FakeHttpTransport>();
+    auto logger = std::make_shared<RecordingLogger>();
+    FakeClock clock;
+    Executor executor(DefaultQueue(), transport, clock, logger, config_error);
+
+    int delivered = 0;
+    Completion last;
+    const std::uint64_t id = executor.Submit(Get("https://example.test/a"),
+                                             [&](const Completion& c) {
+                                                 ++delivered;
+                                                 last = c;
+                                             });
+
+    CHECK_EQ_INT(static_cast<long long>(id), 0);
+    CHECK_EQ_INT(delivered, 0);
+
+    // Delivered on Update, like every other rejection.
+    CHECK(!executor.Update());
+    CHECK_EQ_INT(delivered, 1);
+    CHECK(last.error.code == ErrorCode::InvalidConfig);
+
+    // And nothing was ever sent.
+    CHECK_EQ_INT(static_cast<long long>(transport->StartCount()), 0);
 }
 
 void TestAbandonCancelsInFlightWithoutCallingBack()
@@ -562,7 +706,12 @@ int main()
     TestBackedUpQueueWaitsWhenDenyIsOff();
     TestDeadTransportFailsInFlightRequests();
     TestSetTransportReplacesTheSeam();
+    TestSetTransportIsRefusedWhileInFlight();
     TestEachAttemptIsLoggedAndObfuscated();
+    TestRetryAfterZeroRetriesImmediately();
+    TestHugeRetryAfterIsClampedNotOverflowed();
+    TestLargeBackoffFactorDoesNotOverflow();
+    TestInvalidConfigRejectsThroughUpdate();
     TestAbandonCancelsInFlightWithoutCallingBack();
 
     return testing::Report();

@@ -77,17 +77,18 @@ Client::Client(const Config& config) : m_impl(new Impl())
 #endif
     }
 
-    m_impl->executor.reset(
-        new core::Executor(config.queue, transport, m_impl->clock, logger));
+    m_impl->executor.reset(new core::Executor(config.queue, transport, m_impl->clock, logger,
+                                              m_impl->config_error));
 }
 
 Client::~Client() = default;
 
 bool Client::Update()
 {
-    if (!m_impl->config_error.Ok()) {
-        return false;
-    }
+    // The executor is driven even when the config is invalid, because that is the only way
+    // a rejected request's handler ever runs. `Submit` on an invalid client rejects with
+    // `InvalidConfig` and queues the handler; skipping `Update()` here would leave those
+    // handlers stranded for ever, which is the opposite of what "inert" should mean.
     return m_impl->executor->Update();
 }
 
@@ -101,9 +102,9 @@ const Error& Client::ConfigError() const
     return m_impl->config_error;
 }
 
-void Client::SetTransport(std::weak_ptr<IHttpTransport> transport)
+bool Client::SetTransport(std::weak_ptr<IHttpTransport> transport)
 {
-    m_impl->executor->SetTransport(std::move(transport));
+    return m_impl->executor->SetTransport(std::move(transport));
 }
 
 std::weak_ptr<IHttpTransport> Client::GetTransport() const

@@ -73,7 +73,12 @@ struct Error {
     std::string trace_id;
 
     // From a Retry-After header, in seconds. 0 when absent.
-    int retry_after_seconds = 0;
+    //
+    // `retry_after_present` distinguishes "the server said 0" from "there was no header",
+    // because `Retry-After: 0` is a valid instruction to retry immediately and treating it
+    // as absent would apply the exponential back-off instead.
+    int  retry_after_seconds = 0;
+    bool retry_after_present = false;
 
     bool Ok() const { return code == ErrorCode::None; }
 };
