@@ -284,14 +284,22 @@ void Executor::FinishOrRetry(std::uint64_t id, Completion completion, std::int64
     Entry& entry = it->second;
 
     // --- Classify the outcome ---------------------------------------------------------
-
+    //
+    // Every non-2xx status is an error, not just 4xx and 5xx. A 3xx matters specifically
+    // because redirects are disabled in the default transport (D3): a 302 arrives here as
+    // a plain response, and if it were left as `None` the module layer would try to decode
+    // the redirect body as a normal API response and report a confusing decode error
+    // instead of "the server redirected us".
+    //
+    // 204 is the one legitimate empty success (`EndSession`), and it is a 2xx, so it is
+    // unaffected.
     if (completion.status_code == 0) {
         completion.error = MakeError(ErrorCode::Transport,
                                      "no response arrived: the transport failed");
     } else if (completion.status_code == 429) {
         completion.error = MakeError(ErrorCode::RateLimited, "the server rate limited us",
                                      completion.status_code);
-    } else if (completion.status_code >= 400) {
+    } else if (completion.status_code >= 300) {
         completion.error = MakeError(ErrorCode::Http, "the server returned an error status",
                                      completion.status_code);
     }

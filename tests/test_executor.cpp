@@ -667,6 +667,67 @@ void TestInvalidConfigRejectsThroughUpdate()
     CHECK_EQ_INT(static_cast<long long>(transport->StartCount()), 0);
 }
 
+void TestRedirectIsAnErrorNotASuccess()
+{
+    Fixture f;
+
+    int delivered = 0;
+    Completion last;
+    const std::uint64_t id = f.executor->Submit(
+        Get("https://example.test/a"), [&](const Completion& c) {
+            ++delivered;
+            last = c;
+        });
+
+    CHECK(f.executor->Update());
+
+    // Redirects are disabled in the default transport (D3), so a 302 arrives as a plain
+    // response. It must not be delivered as a success: the module layer would try to decode
+    // the redirect body as an API response and report a confusing decode error instead of
+    // "the server redirected us".
+    IHttpTransport::Response response;
+    response.status_code = 302;
+    response.body = "<html>moved</html>";
+    response.headers.Set("Location", "https://elsewhere.test/");
+    f.transport->Complete(id, response);
+
+    CHECK(!f.executor->Update());
+    CHECK_EQ_INT(delivered, 1);
+    CHECK(last.error.code == ErrorCode::Http);
+    CHECK_EQ_INT(last.status_code, 302);
+
+    // Not retried: a 3xx is not in the retryable set, and retrying would just redirect
+    // again.
+    CHECK_EQ_INT(static_cast<long long>(f.transport->StartCount()), 1);
+
+    // The body is still carried, so the adopter can see what the server actually sent (D7).
+    CHECK_EQ(last.body, std::string("<html>moved</html>"));
+}
+
+void TestNoContentIsStillASuccess()
+{
+    Fixture f;
+
+    int delivered = 0;
+    Completion last;
+    const std::uint64_t id = f.executor->Submit(
+        Get("https://example.test/a"), [&](const Completion& c) {
+            ++delivered;
+            last = c;
+        });
+
+    CHECK(f.executor->Update());
+
+    // 204 is the one legitimate empty success (`EndSession`). Widening the error range to
+    // "everything that is not 2xx" must not catch it.
+    f.transport->Complete(id, 204, "");
+
+    CHECK(!f.executor->Update());
+    CHECK_EQ_INT(delivered, 1);
+    CHECK(last.error.Ok());
+    CHECK_EQ_INT(last.status_code, 204);
+}
+
 void TestAbandonCancelsInFlightWithoutCallingBack()
 {
     Fixture f;
@@ -712,6 +773,8 @@ int main()
     TestHugeRetryAfterIsClampedNotOverflowed();
     TestLargeBackoffFactorDoesNotOverflow();
     TestInvalidConfigRejectsThroughUpdate();
+    TestRedirectIsAnErrorNotASuccess();
+    TestNoContentIsStillASuccess();
     TestAbandonCancelsInFlightWithoutCallingBack();
 
     return testing::Report();

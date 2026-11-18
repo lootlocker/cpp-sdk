@@ -38,6 +38,20 @@
 
 namespace testing {
 
+// The platform's socket handle type, used everywhere instead of `int`.
+//
+// On 64-bit Windows `SOCKET` is a pointer-sized `UINT_PTR`, so narrowing it to `int` is not
+// merely lossy in theory: a handle whose value exceeds 32 bits would be truncated and the
+// call would operate on the wrong socket. On POSIX the handle is an `int`, so this is the
+// same type there and the casts below are no-ops.
+#if defined(_WIN32)
+using SocketHandle = SOCKET;
+static const SocketHandle kInvalidSocket = INVALID_SOCKET;
+#else
+using SocketHandle = int;
+static const SocketHandle kInvalidSocket = -1;
+#endif
+
 // One request as it arrived on the wire.
 struct ReceivedRequest {
     std::string method;
@@ -109,14 +123,14 @@ public:
         m_wsa_started = true;
 #endif
 
-        m_listen = static_cast<std::intptr_t>(::socket(AF_INET, SOCK_STREAM, 0));
-        if (m_listen < 0) {
+        m_listen = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (m_listen == kInvalidSocket) {
             return false;
         }
 
         // SO_REUSEADDR so a rerun in the same process does not fail on a lingering socket.
         int yes = 1;
-        ::setsockopt(static_cast<int>(m_listen), SOL_SOCKET, SO_REUSEADDR,
+        ::setsockopt(m_listen, SOL_SOCKET, SO_REUSEADDR,
                      reinterpret_cast<const char*>(&yes), sizeof(yes));
 
         sockaddr_in address{};
@@ -126,8 +140,7 @@ public:
         address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         address.sin_port = 0;   // ephemeral
 
-        if (::bind(static_cast<int>(m_listen), reinterpret_cast<sockaddr*>(&address),
-                   sizeof(address)) != 0) {
+        if (::bind(m_listen, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
             CloseListen();
             return false;
         }
@@ -139,14 +152,13 @@ public:
 #else
         socklen_t length = sizeof(bound);
 #endif
-        if (::getsockname(static_cast<int>(m_listen), reinterpret_cast<sockaddr*>(&bound),
-                          &length) != 0) {
+        if (::getsockname(m_listen, reinterpret_cast<sockaddr*>(&bound), &length) != 0) {
             CloseListen();
             return false;
         }
         m_port = ntohs(bound.sin_port);
 
-        if (::listen(static_cast<int>(m_listen), 8) != 0) {
+        if (::listen(m_listen, 8) != 0) {
             CloseListen();
             return false;
         }
@@ -213,12 +225,23 @@ public:
     }
 
 private:
+    // Close a socket without narrowing it. On Windows the handle is pointer-sized, so it
+    // must go to `closesocket` as a `SOCKET` and never through an `int`.
+    static void CloseSocket(SocketHandle socket)
+    {
+#if defined(_WIN32)
+        ::closesocket(socket);
+#else
+        ::close(socket);
+#endif
+    }
+
     // Connect to ourselves so the blocked `accept` returns. The accepted connection is
     // closed immediately by `Run`, which sees `m_running` false and exits.
     void WakeAccept()
     {
-        const std::intptr_t wake = static_cast<std::intptr_t>(::socket(AF_INET, SOCK_STREAM, 0));
-        if (wake < 0) {
+        const SocketHandle wake = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (wake == kInvalidSocket) {
             return;
         }
 
@@ -227,33 +250,24 @@ private:
         address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         address.sin_port = htons(static_cast<unsigned short>(m_port));
 
-        ::connect(static_cast<int>(wake), reinterpret_cast<sockaddr*>(&address), sizeof(address));
+        ::connect(wake, reinterpret_cast<sockaddr*>(&address), sizeof(address));
 
-#if defined(_WIN32)
-        ::closesocket(static_cast<SOCKET>(wake));
-#else
-        ::close(static_cast<int>(wake));
-#endif
+        CloseSocket(wake);
     }
 
     void CloseListen()
     {
-        if (m_listen >= 0) {
-#if defined(_WIN32)
-            ::closesocket(static_cast<SOCKET>(m_listen));
-#else
-            ::close(static_cast<int>(m_listen));
-#endif
-            m_listen = -1;
+        if (m_listen != kInvalidSocket) {
+            CloseSocket(m_listen);
+            m_listen = kInvalidSocket;
         }
     }
 
     void Run()
     {
         while (m_running.load()) {
-            const std::intptr_t client =
-                static_cast<std::intptr_t>(::accept(static_cast<int>(m_listen), nullptr, nullptr));
-            if (client < 0) {
+            const SocketHandle client = ::accept(m_listen, nullptr, nullptr);
+            if (client == kInvalidSocket) {
                 // The accept failed; stop rather than spin on a broken listener.
                 break;
             }
@@ -261,33 +275,25 @@ private:
             // The wake-up connection from `Stop()`. Nothing is read from it: the flag is
             // already false, so the loop exits and the socket is closed below.
             if (!m_running.load()) {
-#if defined(_WIN32)
-                ::closesocket(static_cast<SOCKET>(client));
-#else
-                ::close(static_cast<int>(client));
-#endif
+                CloseSocket(client);
                 break;
             }
 
             HandleOne(client);
 
-#if defined(_WIN32)
-            ::closesocket(static_cast<SOCKET>(client));
-#else
-            ::close(static_cast<int>(client));
-#endif
+            CloseSocket(client);
         }
     }
 
     // Read until the header terminator, then read exactly Content-Length bytes.
-    static bool ReadRequest(std::intptr_t client, ReceivedRequest& out)
+    static bool ReadRequest(SocketHandle client, ReceivedRequest& out)
     {
         std::string buffer;
         char chunk[4096];
 
         std::size_t header_end = std::string::npos;
         while (header_end == std::string::npos) {
-            const int got = ::recv(static_cast<int>(client), chunk, sizeof(chunk), 0);
+            const int got = ::recv(client, chunk, sizeof(chunk), 0);
             if (got <= 0) {
                 return false;
             }
@@ -352,7 +358,7 @@ private:
         }
 
         while (body.size() < expected) {
-            const int got = ::recv(static_cast<int>(client), chunk, sizeof(chunk), 0);
+            const int got = ::recv(client, chunk, sizeof(chunk), 0);
             if (got <= 0) {
                 break;
             }
@@ -363,7 +369,7 @@ private:
         return true;
     }
 
-    void HandleOne(std::intptr_t client)
+    void HandleOne(SocketHandle client)
     {
         ReceivedRequest request;
         if (!ReadRequest(client, request)) {
@@ -396,7 +402,7 @@ private:
 
         std::size_t sent = 0;
         while (sent < out.size()) {
-            const int wrote = ::send(static_cast<int>(client), out.data() + sent,
+            const int wrote = ::send(client, out.data() + sent,
                                      static_cast<int>(out.size() - sent), 0);
             if (wrote <= 0) {
                 return;
@@ -405,7 +411,7 @@ private:
         }
     }
 
-    std::intptr_t m_listen = -1;
+    SocketHandle m_listen = kInvalidSocket;
     int           m_port = 0;
 
     // Windows-only: WSAStartup has to be paired with WSACleanup. Guarded rather than left
