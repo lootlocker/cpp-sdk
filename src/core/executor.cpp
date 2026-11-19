@@ -178,7 +178,47 @@ void Executor::ParseRetryAfter(const std::string& value, Error& error)
     error.retry_after_present = true;
 }
 
-std::uint64_t Executor::Submit(PendingRequest request, CompletionHandler on_done)
+bool Executor::IsSameRequest(const PendingRequest& a, const PendingRequest& b)
+{
+    // Only an idempotent request is ever merged. Merging two writes would silently drop
+    // one, which is the same class of bug as retrying a lost POST (R25).
+    if (!a.idempotent || !b.idempotent) {
+        return false;
+    }
+
+    if (a.method != b.method || a.url != b.url || a.body != b.body) {
+        return false;
+    }
+
+    // Headers compared as an ordered list, not as a set: order and case are part of what
+    // goes on the wire, and two requests that differ in either are not the same request.
+    const std::vector<HeaderMap::Entry>& left = a.headers.Entries();
+    const std::vector<HeaderMap::Entry>& right = b.headers.Entries();
+    if (left.size() != right.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < left.size(); ++i) {
+        if (left[i].name != right[i].name || left[i].value != right[i].value) {
+            return false;
+        }
+    }
+    return true;
+}
+
+Executor::Entry* Executor::FindDuplicate(const PendingRequest& request)
+{
+    if (!request.idempotent) {
+        return nullptr;
+    }
+    for (auto& pair : m_entries) {
+        if (IsSameRequest(pair.second.request, request)) {
+            return &pair.second;
+        }
+    }
+    return nullptr;
+}
+
+RequestId Executor::Submit(PendingRequest request, CompletionHandler on_done)
 {
     const std::int64_t now = m_clock.NowMs();
 
@@ -193,7 +233,17 @@ std::uint64_t Executor::Submit(PendingRequest request, CompletionHandler on_done
             m_rejected.push_back(
                 [handler = std::move(on_done), completion]() { handler(completion); });
         }
-        return 0;
+        return RequestId();
+    }
+
+    // A submission identical to one already queued or in flight is merged onto it, so the
+    // server sees one request and both callers get the same completion. The existing id is
+    // returned, which is how the caller can tell that it happened.
+    if (Entry* existing = FindDuplicate(request)) {
+        if (on_done) {
+            existing->on_done.push_back(std::move(on_done));
+        }
+        return existing->id;
     }
 
     // The queue is full. `deny_when_backed_up` decides whether that is an error or a wait:
@@ -208,16 +258,18 @@ std::uint64_t Executor::Submit(PendingRequest request, CompletionHandler on_done
             m_rejected.push_back(
                 [handler = std::move(on_done), completion]() { handler(completion); });
         }
-        return 0;
+        return RequestId();
     }
 
     Entry entry;
-    entry.id = m_next_id++;
+    entry.id = RequestId(m_next_id++);
     entry.request = std::move(request);
-    entry.on_done = std::move(on_done);
+    if (on_done) {
+        entry.on_done.push_back(std::move(on_done));
+    }
     entry.ready_at_ms = now;
 
-    const std::uint64_t id = entry.id;
+    const RequestId id = entry.id;
     m_entries.emplace(id, std::move(entry));
     return id;
 }
@@ -262,6 +314,7 @@ void Executor::LogAttempt(const Entry& entry, const Completion& completion,
     http.status_code = completion.status_code;
     http.duration_ms = duration_ms;
     http.attempt = entry.attempts;
+    http.request_id = entry.id.ToString();
 
     std::string trace_id;
     if (completion.headers.Get("LL-Trace-Id", trace_id)) {
@@ -273,7 +326,7 @@ void Executor::LogAttempt(const Entry& entry, const Completion& completion,
     log::LogExchange(*logger, http);
 }
 
-void Executor::FinishOrRetry(std::uint64_t id, Completion completion, std::int64_t now,
+void Executor::FinishOrRetry(RequestId id, Completion completion, std::int64_t now,
                              std::vector<CompletionHandler>& out_handlers,
                              std::vector<Completion>& out_completions)
 {
@@ -328,13 +381,17 @@ void Executor::FinishOrRetry(std::uint64_t id, Completion completion, std::int64
         return;
     }
 
-    // Delivered. The entry is erased before the handler runs, so a handler that submits a
+    // Delivered. The entry is erased before the handlers run, so a handler that submits a
     // new request cannot invalidate the map under us.
-    CompletionHandler handler = std::move(entry.on_done);
+    //
+    // Every handler on the entry is called with the same completion. There is more than one
+    // only when a submission was deduplicated onto this entry, and each of those callers
+    // asked for the same thing, so each gets the same answer.
+    for (CompletionHandler& handler : entry.on_done) {
+        out_handlers.push_back(std::move(handler));
+        out_completions.push_back(completion);
+    }
     m_entries.erase(it);
-
-    out_handlers.push_back(std::move(handler));
-    out_completions.push_back(std::move(completion));
 }
 
 bool Executor::Update()
@@ -379,12 +436,12 @@ bool Executor::Update()
     // completion on the first poll - so polling again would lose the response and report an
     // empty result.
     struct Finished {
-        std::uint64_t             id = 0;
+        RequestId                 id;
         IHttpTransport::Response  response;
     };
 
     std::vector<Finished>      finished;
-    std::vector<std::uint64_t> timed_out;
+    std::vector<RequestId>     timed_out;
 
     for (auto& pair : m_entries) {
         Entry& entry = pair.second;
@@ -428,7 +485,7 @@ bool Executor::Update()
         FinishOrRetry(done.id, std::move(completion), now, handlers, completions);
     }
 
-    for (const std::uint64_t id : timed_out) {
+    for (const RequestId id : timed_out) {
         const auto it = m_entries.find(id);
         if (it == m_entries.end()) {
             continue;
@@ -455,7 +512,7 @@ bool Executor::Update()
     // rather than one item.
 
     {
-        std::vector<std::uint64_t> ready;
+        std::vector<RequestId>     ready;
         for (const auto& pair : m_entries) {
             const Entry& entry = pair.second;
             if (!entry.in_flight && entry.ready_at_ms <= now) {
@@ -465,7 +522,7 @@ bool Executor::Update()
         // Id order, so the queue is FIFO among requests that are equally ready.
         std::sort(ready.begin(), ready.end());
 
-        for (const std::uint64_t id : ready) {
+        for (const RequestId id : ready) {
             if (static_cast<int>(InFlightCount()) >= m_config.max_in_flight) {
                 break;
             }
@@ -482,6 +539,16 @@ bool Executor::Update()
             request.headers = entry.request.headers;
             request.body = entry.request.body;
             request.timeout_seconds = m_config.request_timeout_seconds;
+
+            // The id goes on the wire as `LL-Request-Id`, so a support ticket can be
+            // matched to a server log line (D25).
+            //
+            // Set here, at send time, rather than on the stored request. Two reasons: the
+            // stored request is what deduplication compares, so stamping it would make
+            // every request unique and dedupe would never fire; and a retry re-sends the
+            // same logical request, so it carries the same id, which is what makes a
+            // server log show one id across attempts.
+            request.headers.Set("LL-Request-Id", entry.id.ToString());
 
             ++entry.attempts;
             entry.started_at_ms = now;
@@ -522,17 +589,20 @@ void Executor::FailAll(const std::string& reason)
 
     for (auto& pair : m_entries) {
         Entry& entry = pair.second;
-        if (entry.on_done) {
-            Completion completion;
-            completion.status_code = 0;
-            completion.attempts = entry.attempts;
-            // `Transport`, not `Cancelled`: the request did not fail because anyone
-            // cancelled it, it failed because there is no way to send it. An adopter
-            // branching on the code needs to tell "I cancelled this" from "the SDK could
-            // not send this".
-            completion.error = MakeError(ErrorCode::Transport, reason);
-            handlers.push_back(std::move(entry.on_done));
-            completions.push_back(std::move(completion));
+        Completion completion;
+        completion.status_code = 0;
+        completion.attempts = entry.attempts;
+        // `Transport`, not `Cancelled`: the request did not fail because anyone
+        // cancelled it, it failed because there is no way to send it. An adopter
+        // branching on the code needs to tell "I cancelled this" from "the SDK could
+        // not send this".
+        completion.error = MakeError(ErrorCode::Transport, reason);
+
+        // Every handler on the entry, because a deduplicated submission has more than one
+        // and each of those callers is waiting.
+        for (CompletionHandler& handler : entry.on_done) {
+            handlers.push_back(std::move(handler));
+            completions.push_back(completion);
         }
     }
     m_entries.clear();

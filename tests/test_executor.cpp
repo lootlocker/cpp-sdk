@@ -100,14 +100,16 @@ void TestOneUpdateDrainsSeveralCompletions()
     Fixture f;
 
     int delivered = 0;
-    std::vector<std::uint64_t> ids;
+    std::vector<RequestId> ids;
     for (int i = 0; i < 3; ++i) {
-        ids.push_back(f.executor->Submit(Get("https://example.test/a"),
+        // Distinct URLs, because three identical GETs would now dedupe onto one entry -
+        // which is correct behaviour, and would make this test measure the wrong thing.
+        ids.push_back(f.executor->Submit(Get("https://example.test/a" + std::to_string(i)),
                                          [&delivered](const Completion&) { ++delivered; }));
     }
 
     CHECK_EQ_INT(static_cast<long long>(ids.size()), 3);
-    CHECK(ids[0] != 0 && ids[1] != 0 && ids[2] != 0);
+    CHECK(ids[0].IsValid() && ids[1].IsValid() && ids[2].IsValid());
 
     // One Update starts all three, because max_in_flight is 50.
     CHECK(f.executor->Update());
@@ -116,8 +118,10 @@ void TestOneUpdateDrainsSeveralCompletions()
 
     // Complete all three, then a single Update must deliver all three. This is the
     // "frame's worth of work, not one item" contract (D5).
-    for (const std::uint64_t id : ids) {
-        f.transport->Complete(id, 200, "{}");
+    const auto order = f.transport->Order();
+    CHECK_EQ_INT(static_cast<long long>(order.size()), 3);
+    for (const auto transfer : order) {
+        f.transport->Complete(transfer, 200, "{}");
     }
 
     CHECK(!f.executor->Update());
@@ -136,16 +140,16 @@ void TestUpdateReturnsFalseOnlyWhenEmpty()
     CHECK(!f.executor->Update());
 
     bool delivered = false;
-    const std::uint64_t id =
+    const RequestId id =
         f.executor->Submit(Get("https://example.test/a"),
                            [&delivered](const Completion&) { delivered = true; });
-    CHECK(id != 0);
+    CHECK(id.IsValid());
 
     // Queued, so there is work.
     CHECK(f.executor->Update());
     CHECK(!delivered);
 
-    f.transport->Complete(id, 200, "{}");
+    f.transport->Complete(f.transport->Order().back(), 200, "{}");
 
     // The call that delivers the last completion also reports that nothing is left. A
     // `while (Update())` loop therefore terminates after the callback has fired, which is
@@ -213,14 +217,14 @@ void TestClientErrorDoesNotRetry()
 
     int delivered = 0;
     Completion last;
-    const std::uint64_t id = f.executor->Submit(
+    const RequestId id = f.executor->Submit(
         Get("https://example.test/a"), [&](const Completion& c) {
             ++delivered;
             last = c;
         });
 
     CHECK(f.executor->Update());
-    f.transport->Complete(id, 400, "{\"error\":\"bad\"}");
+    f.transport->Complete(f.transport->Order().back(), 400, "{\"error\":\"bad\"}");
 
     // A 400 will be a 400 again, so it is delivered on the first Update after it arrives.
     CHECK(!f.executor->Update());
@@ -238,7 +242,7 @@ void TestRetryAfterIsHonoured()
 {
     Fixture f;
 
-    const std::uint64_t id =
+    const RequestId id =
         f.executor->Submit(Get("https://example.test/a"), [](const Completion&) {});
 
     CHECK(f.executor->Update());
@@ -247,7 +251,7 @@ void TestRetryAfterIsHonoured()
     response.status_code = 429;
     response.body = "{}";
     response.headers.Set("Retry-After", "7");
-    f.transport->Complete(id, response);
+    f.transport->Complete(f.transport->Order().back(), response);
 
     CHECK(f.executor->Update());
 
@@ -351,14 +355,14 @@ void TestServerErrorOnPostIsStillRetried()
     Fixture f;
 
     int delivered = 0;
-    const std::uint64_t id = f.executor->Submit(Post("https://example.test/grant"),
+    const RequestId id = f.executor->Submit(Post("https://example.test/grant"),
                                                 [&](const Completion&) { ++delivered; });
 
     CHECK(f.executor->Update());
 
     // A 500 is a *received* response: the server told us it failed, so the request did not
     // take effect and retrying is safe even for a POST. Only a lost response is ambiguous.
-    f.transport->Complete(id, 500, "boom");
+    f.transport->Complete(f.transport->Order().back(), 500, "boom");
     CHECK(f.executor->Update());
     CHECK_EQ_INT(delivered, 0);
 
@@ -376,7 +380,10 @@ void TestConcurrencyCapIsRespected()
     Fixture f(config);
 
     for (int i = 0; i < 5; ++i) {
-        f.executor->Submit(Get("https://example.test/a"), [](const Completion&) {});
+        // Distinct URLs: five identical GETs would dedupe onto one entry, which is correct
+        // behaviour but not what this test is measuring.
+        f.executor->Submit(Get("https://example.test/a" + std::to_string(i)),
+                           [](const Completion&) {});
     }
 
     CHECK(f.executor->Update());
@@ -399,20 +406,20 @@ void TestFullQueueRejectsAndReportsOnNextUpdate()
     config.deny_when_backed_up = true;
     Fixture f(config);
 
-    const std::uint64_t first =
+    const RequestId first =
         f.executor->Submit(Get("https://example.test/a"), [](const Completion&) {});
-    CHECK(first != 0);
+    CHECK(first.IsValid());
 
     int rejected = 0;
     Completion rejection;
-    const std::uint64_t second = f.executor->Submit(
+    const RequestId second = f.executor->Submit(
         Get("https://example.test/b"), [&](const Completion& c) {
             ++rejected;
             rejection = c;
         });
 
     // Rejected outright, and the id says so.
-    CHECK_EQ_INT(static_cast<long long>(second), 0);
+    CHECK(!second.IsValid());
 
     // The handler is not called synchronously: callbacks fire from Update() (D5).
     CHECK_EQ_INT(rejected, 0);
@@ -429,14 +436,14 @@ void TestBackedUpQueueWaitsWhenDenyIsOff()
     config.deny_when_backed_up = false;
     Fixture f(config);
 
-    const std::uint64_t first =
+    const RequestId first =
         f.executor->Submit(Get("https://example.test/a"), [](const Completion&) {});
-    const std::uint64_t second =
+    const RequestId second =
         f.executor->Submit(Get("https://example.test/b"), [](const Completion&) {});
 
     // Both accepted: the adopter chose to stall rather than drop.
-    CHECK(first != 0);
-    CHECK(second != 0);
+    CHECK(first.IsValid());
+    CHECK(second.IsValid());
 }
 
 // --- The transport seam ----------------------------------------------------------------
@@ -522,7 +529,7 @@ void TestEachAttemptIsLoggedAndObfuscated()
 {
     Fixture f;
 
-    const std::uint64_t id =
+    const RequestId id =
         f.executor->Submit(Get("https://example.test/a"), [](const Completion&) {});
 
     CHECK(f.executor->Update());
@@ -531,7 +538,7 @@ void TestEachAttemptIsLoggedAndObfuscated()
     response.status_code = 200;
     response.body = "{\"session_token\":\"abcdef1234567890\"}";
     response.headers.Set("LL-Trace-Id", "trace-42");
-    f.transport->Complete(id, response);
+    f.transport->Complete(f.transport->Order().back(), response);
 
     CHECK(!f.executor->Update());
 
@@ -554,7 +561,7 @@ void TestRetryAfterZeroRetriesImmediately()
 {
     Fixture f;
 
-    const std::uint64_t id =
+    const RequestId id =
         f.executor->Submit(Get("https://example.test/a"), [](const Completion&) {});
 
     CHECK(f.executor->Update());
@@ -565,7 +572,7 @@ void TestRetryAfterZeroRetriesImmediately()
     // A valid instruction to retry immediately. Treating it as "no header" would apply the
     // 50 ms exponential back-off instead, which is not what the server asked for.
     response.headers.Set("Retry-After", "0");
-    f.transport->Complete(id, response);
+    f.transport->Complete(f.transport->Order().back(), response);
 
     // No clock advance at all, and the retry is already due.
     CHECK(f.executor->Update());
@@ -576,7 +583,7 @@ void TestHugeRetryAfterIsClampedNotOverflowed()
 {
     Fixture f;
 
-    const std::uint64_t id =
+    const RequestId id =
         f.executor->Submit(Get("https://example.test/a"), [](const Completion&) {});
 
     CHECK(f.executor->Update());
@@ -587,7 +594,7 @@ void TestHugeRetryAfterIsClampedNotOverflowed()
     // Server-controlled input, so it is not trusted to be small. This overflows a signed
     // int on the multiply if the accumulator is not checked.
     response.headers.Set("Retry-After", "99999999999999999999");
-    f.transport->Complete(id, response);
+    f.transport->Complete(f.transport->Order().back(), response);
 
     // Clamped to the largest representable delay rather than wrapping negative. A negative
     // delay would make the retry due immediately, which is the opposite of obeying.
@@ -607,11 +614,11 @@ void TestLargeBackoffFactorDoesNotOverflow()
     config.initial_backoff_ms = 1000000;
     Fixture f(config);
 
-    const std::uint64_t id =
+    const RequestId id =
         f.executor->Submit(Get("https://example.test/a"), [](const Completion&) {});
 
     CHECK(f.executor->Update());
-    f.transport->Complete(id, 503, "unavailable");
+    f.transport->Complete(f.transport->Order().back(), 503, "unavailable");
     f.executor->Update();
 
     // The first delay is already 1,000,000 ms, so a second is not enough.
@@ -649,13 +656,13 @@ void TestInvalidConfigRejectsThroughUpdate()
 
     int delivered = 0;
     Completion last;
-    const std::uint64_t id = executor.Submit(Get("https://example.test/a"),
+    const RequestId id = executor.Submit(Get("https://example.test/a"),
                                              [&](const Completion& c) {
                                                  ++delivered;
                                                  last = c;
                                              });
 
-    CHECK_EQ_INT(static_cast<long long>(id), 0);
+    CHECK(!id.IsValid());
     CHECK_EQ_INT(delivered, 0);
 
     // Delivered on Update, like every other rejection.
@@ -673,7 +680,7 @@ void TestRedirectIsAnErrorNotASuccess()
 
     int delivered = 0;
     Completion last;
-    const std::uint64_t id = f.executor->Submit(
+    const RequestId id = f.executor->Submit(
         Get("https://example.test/a"), [&](const Completion& c) {
             ++delivered;
             last = c;
@@ -689,7 +696,7 @@ void TestRedirectIsAnErrorNotASuccess()
     response.status_code = 302;
     response.body = "<html>moved</html>";
     response.headers.Set("Location", "https://elsewhere.test/");
-    f.transport->Complete(id, response);
+    f.transport->Complete(f.transport->Order().back(), response);
 
     CHECK(!f.executor->Update());
     CHECK_EQ_INT(delivered, 1);
@@ -710,7 +717,7 @@ void TestNoContentIsStillASuccess()
 
     int delivered = 0;
     Completion last;
-    const std::uint64_t id = f.executor->Submit(
+    const RequestId id = f.executor->Submit(
         Get("https://example.test/a"), [&](const Completion& c) {
             ++delivered;
             last = c;
@@ -720,12 +727,182 @@ void TestNoContentIsStillASuccess()
 
     // 204 is the one legitimate empty success (`EndSession`). Widening the error range to
     // "everything that is not 2xx" must not catch it.
-    f.transport->Complete(id, 204, "");
+    f.transport->Complete(f.transport->Order().back(), 204, "");
 
     CHECK(!f.executor->Update());
     CHECK_EQ_INT(delivered, 1);
     CHECK(last.error.Ok());
     CHECK_EQ_INT(last.status_code, 204);
+}
+
+// --- RequestId (T11d) ------------------------------------------------------------------
+
+void TestRequestIdIsSentAsTheHeader()
+{
+    Fixture f;
+
+    const RequestId id =
+        f.executor->Submit(Get("https://example.test/a"), [](const Completion&) {});
+    CHECK(id.IsValid());
+
+    CHECK(f.executor->Update());
+
+    // The id the caller got is the id that went on the wire, so a support ticket can be
+    // matched to a server log line (D25).
+    const auto order = f.transport->Order();
+    CHECK_EQ_INT(static_cast<long long>(order.size()), 1);
+    const IHttpTransport::Request* sent = f.transport->FindRequest(order[0]);
+    CHECK(sent != nullptr);
+    if (sent != nullptr) {
+        CHECK(sent->headers.Has("LL-Request-Id"));
+    }
+}
+
+void TestRequestIdHeaderMatchesTheReturnedId()
+{
+    Fixture f;
+
+    const RequestId id =
+        f.executor->Submit(Get("https://example.test/a"), [](const Completion&) {});
+    CHECK(f.executor->Update());
+
+    const auto order = f.transport->Order();
+    const IHttpTransport::Request* sent = f.transport->FindRequest(order[0]);
+    CHECK(sent != nullptr);
+    if (sent != nullptr) {
+        std::string header;
+        CHECK(sent->headers.Get("LL-Request-Id", header));
+        CHECK_EQ(header, id.ToString());
+    }
+}
+
+void TestRetryKeepsTheSameRequestId()
+{
+    Fixture f;
+
+    const RequestId id =
+        f.executor->Submit(Get("https://example.test/a"), [](const Completion&) {});
+    CHECK(f.executor->Update());
+    f.transport->Complete(f.transport->Order().back(), 500, "boom");
+    f.executor->Update();
+    f.clock.Advance(50);
+    CHECK(f.executor->Update());
+
+    // Both attempts carry the same id: it is the same logical request, and a server log
+    // should show one id across attempts rather than one per attempt.
+    const auto order = f.transport->Order();
+    CHECK_EQ_INT(static_cast<long long>(order.size()), 2);
+    for (const auto transfer : order) {
+        const IHttpTransport::Request* sent = f.transport->FindRequest(transfer);
+        CHECK(sent != nullptr);
+        if (sent != nullptr) {
+            std::string header;
+            CHECK(sent->headers.Get("LL-Request-Id", header));
+            CHECK_EQ(header, id.ToString());
+        }
+    }
+}
+
+void TestIdenticalConcurrentRequestsDedupe()
+{
+    Fixture f;
+
+    int first_delivered = 0;
+    int second_delivered = 0;
+    Completion first_completion;
+    Completion second_completion;
+
+    const RequestId first = f.executor->Submit(
+        Get("https://example.test/broadcasts"), [&](const Completion& c) {
+            ++first_delivered;
+            first_completion = c;
+        });
+    const RequestId second = f.executor->Submit(
+        Get("https://example.test/broadcasts"), [&](const Completion& c) {
+            ++second_delivered;
+            second_completion = c;
+        });
+
+    // Merged onto the first: the same id comes back, which is how the caller can tell.
+    CHECK(first.IsValid());
+    CHECK(first == second);
+
+    CHECK(f.executor->Update());
+
+    // One request on the wire, not two.
+    CHECK_EQ_INT(static_cast<long long>(f.transport->StartCount()), 1);
+
+    f.transport->Complete(f.transport->Order().back(), 200, "{\"broadcasts\":[]}");
+    CHECK(!f.executor->Update());
+
+    // Both callers were answered, with the same completion.
+    CHECK_EQ_INT(first_delivered, 1);
+    CHECK_EQ_INT(second_delivered, 1);
+    CHECK_EQ(first_completion.body, second_completion.body);
+    CHECK_EQ(first_completion.body, std::string("{\"broadcasts\":[]}"));
+}
+
+void TestDifferentRequestsDoNotDedupe()
+{
+    Fixture f;
+
+    const RequestId first =
+        f.executor->Submit(Get("https://example.test/a"), [](const Completion&) {});
+    const RequestId second =
+        f.executor->Submit(Get("https://example.test/b"), [](const Completion&) {});
+
+    CHECK(first != second);
+    CHECK(f.executor->Update());
+    CHECK_EQ_INT(static_cast<long long>(f.transport->StartCount()), 2);
+}
+
+void TestNonIdempotentRequestsNeverDedupe()
+{
+    Fixture f;
+
+    // Two identical writes. Merging them would silently drop one, which is the same class
+    // of bug as retrying a lost POST (R25).
+    const RequestId first =
+        f.executor->Submit(Post("https://example.test/grant"), [](const Completion&) {});
+    const RequestId second =
+        f.executor->Submit(Post("https://example.test/grant"), [](const Completion&) {});
+
+    CHECK(first != second);
+    CHECK(f.executor->Update());
+    CHECK_EQ_INT(static_cast<long long>(f.transport->StartCount()), 2);
+}
+
+void TestDedupeDoesNotMergeOntoADeliveredRequest()
+{
+    Fixture f;
+
+    const RequestId first =
+        f.executor->Submit(Get("https://example.test/a"), [](const Completion&) {});
+    CHECK(f.executor->Update());
+    f.transport->Complete(f.transport->Order().back(), 200, "{}");
+    CHECK(!f.executor->Update());
+
+    // The first is gone, so this is a new request rather than a merge onto a finished one.
+    const RequestId second =
+        f.executor->Submit(Get("https://example.test/a"), [](const Completion&) {});
+    CHECK(second.IsValid());
+    CHECK(first != second);
+}
+
+void TestRequestIdToString()
+{
+    CHECK_EQ(RequestId().ToString(), std::string("0"));
+    CHECK_EQ(RequestId(1).ToString(), std::string("1"));
+    CHECK_EQ(RequestId(42).ToString(), std::string("42"));
+    CHECK_EQ(RequestId(1000000).ToString(), std::string("1000000"));
+
+    // The largest value, which is where a hand-rolled decimal conversion is most likely to
+    // be wrong.
+    CHECK_EQ(RequestId(18446744073709551615ULL).ToString(),
+             std::string("18446744073709551615"));
+
+    CHECK(!RequestId().IsValid());
+    CHECK(RequestId(1).IsValid());
 }
 
 void TestAbandonCancelsInFlightWithoutCallingBack()
@@ -775,6 +952,14 @@ int main()
     TestInvalidConfigRejectsThroughUpdate();
     TestRedirectIsAnErrorNotASuccess();
     TestNoContentIsStillASuccess();
+    TestRequestIdIsSentAsTheHeader();
+    TestRequestIdHeaderMatchesTheReturnedId();
+    TestRetryKeepsTheSameRequestId();
+    TestIdenticalConcurrentRequestsDedupe();
+    TestDifferentRequestsDoNotDedupe();
+    TestNonIdempotentRequestsNeverDedupe();
+    TestDedupeDoesNotMergeOntoADeliveredRequest();
+    TestRequestIdToString();
     TestAbandonCancelsInFlightWithoutCallingBack();
 
     return testing::Report();

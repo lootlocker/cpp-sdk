@@ -14,6 +14,7 @@
 #include <lootlocker/header_map.h>
 #include <lootlocker/http_transport.h>
 #include <lootlocker/log.h>
+#include <lootlocker/request_id.h>
 #include <lootlocker/result.h>
 
 #include "clock.h"
@@ -85,9 +86,17 @@ public:
     // contract is that callbacks fire on the thread that calls `Update()` (D5), so a
     // rejected request is delivered on the next `Update()` too.
     //
-    // Returns 0 when the request was rejected outright, which happens only when the queue
-    // is full and `deny_when_backed_up` is set. The handler still runs, with `QueueFull`.
-    std::uint64_t Submit(PendingRequest request, CompletionHandler on_done);
+    // Returns an invalid `RequestId` when the request was rejected outright, which happens
+    // when the queue is full and `deny_when_backed_up` is set, or when the config is
+    // invalid. The handler still runs, with `QueueFull` or `InvalidConfig`.
+    //
+    // **Deduplication (D25).** A submission that is identical to one already queued or in
+    // flight is merged onto it: the new handler is appended to the existing entry and the
+    // existing id is returned, so the caller can see that it happened. "Identical" means
+    // same method, same URL, same headers and same body, byte for byte - and only for an
+    // idempotent request. Merging two writes would silently drop one, which is the same
+    // class of bug as retrying a lost POST (R25).
+    RequestId Submit(PendingRequest request, CompletionHandler on_done);
 
     // A frame's worth of work. Returns false when nothing is queued and nothing is in
     // flight, which is what lets a loop-less program terminate.
@@ -118,9 +127,13 @@ public:
 
 private:
     struct Entry {
-        std::uint64_t     id = 0;
+        RequestId         id;
         PendingRequest    request;
-        CompletionHandler on_done;
+
+        // Every handler waiting on this request. More than one only when a submission was
+        // deduplicated onto this entry, in which case all of them are called with the same
+        // completion.
+        std::vector<CompletionHandler> on_done;
 
         // Attempts started so far, 1-based once the first one begins.
         int attempts = 0;
@@ -133,10 +146,18 @@ private:
         bool                         in_flight = false;
     };
 
+    // Whether two requests are the same for deduplication. Method, URL, headers and body
+    // must match exactly, and the request must be idempotent.
+    static bool IsSameRequest(const PendingRequest& a, const PendingRequest& b);
+
+    // The entry a submission can be merged onto, or nullptr. Only an idempotent request is
+    // ever merged, and only onto an entry that has not yet been delivered.
+    Entry* FindDuplicate(const PendingRequest& request);
+
     // Decide whether a finished attempt is retried or delivered, and either requeue it or
-    // move its handler into the delivery lists. Shared by the poll path and the
+    // move its handlers into the delivery lists. Shared by the poll path and the
     // start-failure path so the policy exists in exactly one place.
-    void FinishOrRetry(std::uint64_t id, Completion completion, std::int64_t now,
+    void FinishOrRetry(RequestId id, Completion completion, std::int64_t now,
                        std::vector<CompletionHandler>& out_handlers,
                        std::vector<Completion>& out_completions);
 
@@ -165,8 +186,8 @@ private:
     Clock&                         m_clock;
     std::weak_ptr<Logger>          m_logger;
 
-    std::uint64_t              m_next_id = 1;
-    std::map<std::uint64_t, Entry> m_entries;
+    std::uint64_t                  m_next_id = 1;
+    std::map<RequestId, Entry>     m_entries;
 
     // Handlers for requests rejected at submit time. Bounded by how many the caller
     // submits while the queue is full, and drained on the next `Update()`.
