@@ -102,9 +102,7 @@ void TestOneUpdateDrainsSeveralCompletions()
     int delivered = 0;
     std::vector<RequestId> ids;
     for (int i = 0; i < 3; ++i) {
-        // Distinct URLs, because three identical GETs would now dedupe onto one entry -
-        // which is correct behaviour, and would make this test measure the wrong thing.
-        ids.push_back(f.executor->Submit(Get("https://example.test/a" + std::to_string(i)),
+        ids.push_back(f.executor->Submit(Get("https://example.test/a"),
                                          [&delivered](const Completion&) { ++delivered; }));
     }
 
@@ -380,10 +378,7 @@ void TestConcurrencyCapIsRespected()
     Fixture f(config);
 
     for (int i = 0; i < 5; ++i) {
-        // Distinct URLs: five identical GETs would dedupe onto one entry, which is correct
-        // behaviour but not what this test is measuring.
-        f.executor->Submit(Get("https://example.test/a" + std::to_string(i)),
-                           [](const Completion&) {});
+        f.executor->Submit(Get("https://example.test/a"), [](const Completion&) {});
     }
 
     CHECK(f.executor->Update());
@@ -803,90 +798,53 @@ void TestRetryKeepsTheSameRequestId()
     }
 }
 
-void TestIdenticalConcurrentRequestsDedupe()
+void TestIdenticalRequestsAreBothSent()
 {
     Fixture f;
 
     int first_delivered = 0;
     int second_delivered = 0;
-    Completion first_completion;
-    Completion second_completion;
 
+    // Two identical submissions are two requests, and both are sent. There is no
+    // deduplication or grouping (owner, 2026-11-19): the API is not guaranteed to be
+    // idempotent, so "add 5 gold" sent twice must yield 10, not 5. The SDK cannot tell that
+    // case apart from a harmless repeated read, so it never merges.
     const RequestId first = f.executor->Submit(
-        Get("https://example.test/broadcasts"), [&](const Completion& c) {
-            ++first_delivered;
-            first_completion = c;
-        });
+        Get("https://example.test/broadcasts"), [&](const Completion&) { ++first_delivered; });
     const RequestId second = f.executor->Submit(
-        Get("https://example.test/broadcasts"), [&](const Completion& c) {
-            ++second_delivered;
-            second_completion = c;
-        });
+        Get("https://example.test/broadcasts"), [&](const Completion&) { ++second_delivered; });
 
-    // Merged onto the first: the same id comes back, which is how the caller can tell.
     CHECK(first.IsValid());
-    CHECK(first == second);
-
-    CHECK(f.executor->Update());
-
-    // One request on the wire, not two.
-    CHECK_EQ_INT(static_cast<long long>(f.transport->StartCount()), 1);
-
-    f.transport->Complete(f.transport->Order().back(), 200, "{\"broadcasts\":[]}");
-    CHECK(!f.executor->Update());
-
-    // Both callers were answered, with the same completion.
-    CHECK_EQ_INT(first_delivered, 1);
-    CHECK_EQ_INT(second_delivered, 1);
-    CHECK_EQ(first_completion.body, second_completion.body);
-    CHECK_EQ(first_completion.body, std::string("{\"broadcasts\":[]}"));
-}
-
-void TestDifferentRequestsDoNotDedupe()
-{
-    Fixture f;
-
-    const RequestId first =
-        f.executor->Submit(Get("https://example.test/a"), [](const Completion&) {});
-    const RequestId second =
-        f.executor->Submit(Get("https://example.test/b"), [](const Completion&) {});
-
-    CHECK(first != second);
-    CHECK(f.executor->Update());
-    CHECK_EQ_INT(static_cast<long long>(f.transport->StartCount()), 2);
-}
-
-void TestNonIdempotentRequestsNeverDedupe()
-{
-    Fixture f;
-
-    // Two identical writes. Merging them would silently drop one, which is the same class
-    // of bug as retrying a lost POST (R25).
-    const RequestId first =
-        f.executor->Submit(Post("https://example.test/grant"), [](const Completion&) {});
-    const RequestId second =
-        f.executor->Submit(Post("https://example.test/grant"), [](const Completion&) {});
-
-    CHECK(first != second);
-    CHECK(f.executor->Update());
-    CHECK_EQ_INT(static_cast<long long>(f.transport->StartCount()), 2);
-}
-
-void TestDedupeDoesNotMergeOntoADeliveredRequest()
-{
-    Fixture f;
-
-    const RequestId first =
-        f.executor->Submit(Get("https://example.test/a"), [](const Completion&) {});
-    CHECK(f.executor->Update());
-    f.transport->Complete(f.transport->Order().back(), 200, "{}");
-    CHECK(!f.executor->Update());
-
-    // The first is gone, so this is a new request rather than a merge onto a finished one.
-    const RequestId second =
-        f.executor->Submit(Get("https://example.test/a"), [](const Completion&) {});
     CHECK(second.IsValid());
     CHECK(first != second);
+
+    CHECK(f.executor->Update());
+    CHECK_EQ_INT(static_cast<long long>(f.transport->StartCount()), 2);
+
+    const auto order = f.transport->Order();
+    f.transport->Complete(order[0], 200, "{}");
+    f.transport->Complete(order[1], 200, "{}");
+    CHECK(!f.executor->Update());
+
+    // Each caller was answered exactly once, by its own request.
+    CHECK_EQ_INT(first_delivered, 1);
+    CHECK_EQ_INT(second_delivered, 1);
+}
+
+void TestIdenticalWritesAreBothSent()
+{
+    Fixture f;
+
+    // The case that made us drop deduplication entirely: two identical "add 5 gold" calls
+    // must both reach the server, because merging them would grant 5 instead of 10.
+    const RequestId first =
+        f.executor->Submit(Post("https://example.test/grant"), [](const Completion&) {});
+    const RequestId second =
+        f.executor->Submit(Post("https://example.test/grant"), [](const Completion&) {});
+
+    CHECK(first != second);
+    CHECK(f.executor->Update());
+    CHECK_EQ_INT(static_cast<long long>(f.transport->StartCount()), 2);
 }
 
 void TestRequestIdToString()
@@ -955,10 +913,8 @@ int main()
     TestRequestIdIsSentAsTheHeader();
     TestRequestIdHeaderMatchesTheReturnedId();
     TestRetryKeepsTheSameRequestId();
-    TestIdenticalConcurrentRequestsDedupe();
-    TestDifferentRequestsDoNotDedupe();
-    TestNonIdempotentRequestsNeverDedupe();
-    TestDedupeDoesNotMergeOntoADeliveredRequest();
+    TestIdenticalRequestsAreBothSent();
+    TestIdenticalWritesAreBothSent();
     TestRequestIdToString();
     TestAbandonCancelsInFlightWithoutCallingBack();
 
