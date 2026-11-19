@@ -46,6 +46,9 @@ struct PendingRequest {
     // out may have succeeded, and retrying it can double-grant. The default is `true`
     // because most of the surface is reads; every write must set it to `false`
     // deliberately, which is the right way round for a safety flag.
+    //
+    // This guards retries only. It does NOT enable any form of request merging: every
+    // submission is its own request, always (owner, 2026-11-19).
     bool idempotent = true;
 };
 
@@ -90,12 +93,12 @@ public:
     // when the queue is full and `deny_when_backed_up` is set, or when the config is
     // invalid. The handler still runs, with `QueueFull` or `InvalidConfig`.
     //
-    // **Deduplication (D25).** A submission that is identical to one already queued or in
-    // flight is merged onto it: the new handler is appended to the existing entry and the
-    // existing id is returned, so the caller can see that it happened. "Identical" means
-    // same method, same URL, same headers and same body, byte for byte - and only for an
-    // idempotent request. Merging two writes would silently drop one, which is the same
-    // class of bug as retrying a lost POST (R25).
+    // **Every submission is its own request. There is no deduplication or grouping**
+    // (owner, 2026-11-19). Two identical submissions are two requests, and both are sent.
+    // The reason is that the API is not guaranteed to be idempotent: "add 5 gold" sent
+    // five times must yield 25, not 5, and the SDK cannot tell that case apart from a
+    // harmless repeated read. The Unity SDK built this and then turned it off for the same
+    // reason.
     RequestId Submit(PendingRequest request, CompletionHandler on_done);
 
     // A frame's worth of work. Returns false when nothing is queued and nothing is in
@@ -145,14 +148,6 @@ private:
         IHttpTransport::TransferId   transfer = 0;
         bool                         in_flight = false;
     };
-
-    // Whether two requests are the same for deduplication. Method, URL, headers and body
-    // must match exactly, and the request must be idempotent.
-    static bool IsSameRequest(const PendingRequest& a, const PendingRequest& b);
-
-    // The entry a submission can be merged onto, or nullptr. Only an idempotent request is
-    // ever merged, and only onto an entry that has not yet been delivered.
-    Entry* FindDuplicate(const PendingRequest& request);
 
     // Decide whether a finished attempt is retried or delivered, and either requeue it or
     // move its handlers into the delivery lists. Shared by the poll path and the

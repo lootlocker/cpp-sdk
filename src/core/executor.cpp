@@ -178,46 +178,6 @@ void Executor::ParseRetryAfter(const std::string& value, Error& error)
     error.retry_after_present = true;
 }
 
-bool Executor::IsSameRequest(const PendingRequest& a, const PendingRequest& b)
-{
-    // Only an idempotent request is ever merged. Merging two writes would silently drop
-    // one, which is the same class of bug as retrying a lost POST (R25).
-    if (!a.idempotent || !b.idempotent) {
-        return false;
-    }
-
-    if (a.method != b.method || a.url != b.url || a.body != b.body) {
-        return false;
-    }
-
-    // Headers compared as an ordered list, not as a set: order and case are part of what
-    // goes on the wire, and two requests that differ in either are not the same request.
-    const std::vector<HeaderMap::Entry>& left = a.headers.Entries();
-    const std::vector<HeaderMap::Entry>& right = b.headers.Entries();
-    if (left.size() != right.size()) {
-        return false;
-    }
-    for (std::size_t i = 0; i < left.size(); ++i) {
-        if (left[i].name != right[i].name || left[i].value != right[i].value) {
-            return false;
-        }
-    }
-    return true;
-}
-
-Executor::Entry* Executor::FindDuplicate(const PendingRequest& request)
-{
-    if (!request.idempotent) {
-        return nullptr;
-    }
-    for (auto& pair : m_entries) {
-        if (IsSameRequest(pair.second.request, request)) {
-            return &pair.second;
-        }
-    }
-    return nullptr;
-}
-
 RequestId Executor::Submit(PendingRequest request, CompletionHandler on_done)
 {
     const std::int64_t now = m_clock.NowMs();
@@ -234,16 +194,6 @@ RequestId Executor::Submit(PendingRequest request, CompletionHandler on_done)
                 [handler = std::move(on_done), completion]() { handler(completion); });
         }
         return RequestId();
-    }
-
-    // A submission identical to one already queued or in flight is merged onto it, so the
-    // server sees one request and both callers get the same completion. The existing id is
-    // returned, which is how the caller can tell that it happened.
-    if (Entry* existing = FindDuplicate(request)) {
-        if (on_done) {
-            existing->on_done.push_back(std::move(on_done));
-        }
-        return existing->id;
     }
 
     // The queue is full. `deny_when_backed_up` decides whether that is an error or a wait:
