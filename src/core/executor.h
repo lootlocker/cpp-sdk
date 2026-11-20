@@ -122,10 +122,11 @@ private:
         RequestId         id;
         PendingRequest    request;
 
-        // Every handler waiting on this request. More than one only when a submission was
-        // deduplicated onto this entry, in which case all of them are called with the same
-        // completion.
-        std::vector<CompletionHandler> on_done;
+        // The one handler waiting on this request. A single handler, not a vector: requests
+        // are never grouped (owner, 2026-11-19), so an entry has exactly one caller. A
+        // vector would add an allocation per submission and imply an invariant that no
+        // longer exists.
+        CompletionHandler on_done;
 
         // Attempts started so far, 1-based once the first one begins.
         int attempts = 0;

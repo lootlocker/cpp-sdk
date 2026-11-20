@@ -11,9 +11,12 @@
 #include "executor.h"
 #include "test_harness.h"
 
+#include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace lootlocker;
@@ -937,6 +940,70 @@ void TestRequestIdNextIsMonotonic()
     CHECK(RequestId::Next().IsValid());
 }
 
+void TestRequestIdNextIsUniqueUnderConcurrency()
+{
+    // The claim under test: every call gets a distinct value, including across threads. A
+    // duplicate here would mean two requests sharing a correlation id, which is exactly what
+    // the id exists to prevent.
+    //
+    // The counts are deliberately large and the threads start together. A smaller run does
+    // not reliably expose a non-atomic counter - verified by sabotage, where a plain
+    // read-then-write passed at 4x2000 and only failed once the contention was real.
+    constexpr int kThreads = 8;
+    constexpr int kPerThread = 20000;
+
+    std::vector<std::vector<std::uint64_t>> minted(kThreads);
+    std::vector<std::thread> threads;
+    threads.reserve(kThreads);
+
+    // A barrier, so the threads contend from the same instant rather than starting in
+    // sequence and never overlapping.
+    std::atomic<int> ready{0};
+    std::atomic<bool> go{false};
+
+    for (int t = 0; t < kThreads; ++t) {
+        threads.emplace_back([&minted, &ready, &go, t]() {
+            // Pre-sized, and written by index rather than push_back: an allocating
+            // push_back spends most of its time in the allocator, which shrinks the window
+            // where two threads are inside the counter at once. Verified by sabotage - with
+            // push_back a non-atomic counter passed, and only this version exposes it.
+            minted[t].resize(kPerThread);
+            ready.fetch_add(1);
+            while (!go.load()) {
+                // spin until every thread is in place
+            }
+            for (int i = 0; i < kPerThread; ++i) {
+                minted[t][static_cast<std::size_t>(i)] = RequestId::Next().Value();
+            }
+        });
+    }
+
+    while (ready.load() < kThreads) {
+        // wait for all threads to be ready
+    }
+    go.store(true);
+
+    for (std::thread& thread : threads) {
+        thread.join();
+    }
+
+    std::vector<std::uint64_t> all;
+    all.reserve(static_cast<std::size_t>(kThreads) * kPerThread);
+    for (const auto& per_thread : minted) {
+        all.insert(all.end(), per_thread.begin(), per_thread.end());
+    }
+
+    CHECK_EQ_INT(static_cast<long long>(all.size()),
+                 static_cast<long long>(kThreads) * kPerThread);
+
+    std::sort(all.begin(), all.end());
+    const auto duplicate = std::adjacent_find(all.begin(), all.end());
+    CHECK(duplicate == all.end());
+
+    // And none of them is the invalid id.
+    CHECK(all.front() != 0);
+}
+
 void TestAbandonCancelsInFlightWithoutCallingBack()
 {
     Fixture f;
@@ -994,6 +1061,7 @@ int main()
     TestTimeoutCarriesTheRequestId();
     TestRequestIdsAreUniqueAcrossClients();
     TestRequestIdNextIsMonotonic();
+    TestRequestIdNextIsUniqueUnderConcurrency();
     TestAbandonCancelsInFlightWithoutCallingBack();
 
     return testing::Report();

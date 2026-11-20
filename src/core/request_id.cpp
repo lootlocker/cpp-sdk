@@ -17,16 +17,27 @@ std::atomic<std::uint64_t> g_next_request_id{1};
 
 RequestId RequestId::Next()
 {
-    std::uint64_t value = g_next_request_id.fetch_add(1, std::memory_order_relaxed);
+    // A CAS loop rather than `fetch_add` plus a fix-up, so that "never 0" is an invariant of
+    // the loop rather than a special case bolted on afterwards.
+    //
+    // The `fetch_add` version was not actually racy: `fetch_add` hands out each value
+    // exactly once, so only one thread could ever observe 0 and take the next value. But
+    // that reasoning needs a paragraph to justify, and a loop that visibly skips 0 needs
+    // none. The cost is one compare-exchange on an uncontended atomic, the same order as the
+    // `fetch_add` it replaces.
+    std::uint64_t current = g_next_request_id.load(std::memory_order_relaxed);
+    for (;;) {
+        // Skip 0, which is the invalid id. Unreachable in practice - a uint64 at a million
+        // requests a second lasts longer than the hardware - but the loop makes the wrap
+        // safe by construction rather than by argument.
+        const std::uint64_t next = (current == 0) ? 1 : current + 1;
 
-    // Skip 0, which is the invalid id. Unreachable in practice - a uint64 at a million
-    // requests a second lasts longer than the hardware - but one comparison removes the
-    // edge case entirely rather than leaving a wrap that would silently produce an invalid
-    // id.
-    if (value == 0) {
-        value = g_next_request_id.fetch_add(1, std::memory_order_relaxed);
+        if (g_next_request_id.compare_exchange_weak(current, next, std::memory_order_relaxed,
+                                                    std::memory_order_relaxed)) {
+            return RequestId(current);
+        }
+        // `current` was reloaded by the failed exchange; loop and retry.
     }
-    return RequestId(value);
 }
 
 std::string RequestId::ToString() const

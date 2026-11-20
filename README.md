@@ -92,11 +92,15 @@ The retry policy, which is the part that bites:
 - **Retried:** 5xx, 429, and a transport failure (no response at all).
 - **Not retried:** any other 4xx. A 400 will be a 400 again.
 - **`Retry-After` is obeyed exactly** when the server sends one, instead of guessing.
-- **A non-idempotent request whose response was lost is never retried.** A POST that timed
-  out may have succeeded, and retrying it can double-grant. A 5xx on a POST *is* retried,
-  because the server told us it failed. This is set per request with
-  `PendingRequest::idempotent`, which defaults to `true` — every write must opt out
-  deliberately.
+- **A lost response is retried whatever the method.** A POST that timed out may have
+  succeeded, and retrying it can double-grant — that is a real risk we accept rather than
+  guard against, because the alternative was a per-request `idempotent` flag that moved a
+  correctness decision onto the caller. See R25 in the spec.
+
+**There is no request deduplication or grouping.** Two identical submissions are two
+requests, and both are sent. The API is not guaranteed to be idempotent: "add 5 gold"
+performed five times must yield 25, not 5, and the SDK cannot tell that apart from a
+harmless repeated read.
 
 ## The transport
 
