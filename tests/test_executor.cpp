@@ -74,7 +74,6 @@ PendingRequest Post(const std::string& url)
     request.method = "POST";
     request.url = url;
     request.body = "{}";
-    request.idempotent = false;   // a write: never retried when the response is lost
     return request;
 }
 
@@ -298,31 +297,36 @@ void TestRetriesStopAtTheBudget()
     CHECK_EQ_INT(last.attempts, 3);
 }
 
-// --- R25: never retry a non-idempotent request whose response was lost -----------------
+// --- A lost response is retried, whatever the method (owner, 2026-11-20) ---------------
+//
+// R25 used to be closed here: a non-idempotent request whose response was lost was never
+// retried, because a POST that timed out may have succeeded. The owner's call is that the
+// other SDKs do not do this and we should not either, so R25 is now an accepted risk. These
+// tests assert the new behaviour, and they exist so the change is visible rather than
+// silent.
 
-void TestTimedOutPostIsNotRetried()
+void TestTimedOutPostIsRetried()
 {
     Fixture f;
 
     int delivered = 0;
-    Completion last;
     f.executor->Submit(Post("https://example.test/grant"), [&](const Completion& c) {
         ++delivered;
-        last = c;
+        (void)c;
     });
 
     CHECK(f.executor->Update());
     CHECK_EQ_INT(static_cast<long long>(f.transport->StartCount()), 1);
 
-    // The response never arrives. A POST that timed out may have succeeded, and retrying
-    // it can double-grant, so it is delivered as a failure instead.
+    // The response never arrives. It is retried like any other transport failure - which
+    // means a POST that actually succeeded may be sent twice. That is the accepted risk.
     f.clock.Advance(300 * 1000);
-    CHECK(!f.executor->Update());
+    CHECK(f.executor->Update());
+    CHECK_EQ_INT(delivered, 0);
 
-    CHECK_EQ_INT(delivered, 1);
-    CHECK_EQ_INT(static_cast<long long>(f.transport->StartCount()), 1);
-    CHECK(last.error.code == ErrorCode::Transport);
-    CHECK_EQ_INT(last.status_code, 0);
+    f.clock.Advance(50);
+    CHECK(f.executor->Update());
+    CHECK_EQ_INT(static_cast<long long>(f.transport->StartCount()), 2);
 }
 
 void TestTimedOutGetIsRetried()
@@ -338,7 +342,6 @@ void TestTimedOutGetIsRetried()
     CHECK(f.executor->Update());
     CHECK_EQ_INT(static_cast<long long>(f.transport->StartCount()), 1);
 
-    // A GET changed nothing, so a lost response is free to retry.
     f.clock.Advance(300 * 1000);
     CHECK(f.executor->Update());
     CHECK_EQ_INT(delivered, 0);
@@ -348,18 +351,16 @@ void TestTimedOutGetIsRetried()
     CHECK_EQ_INT(static_cast<long long>(f.transport->StartCount()), 2);
 }
 
-void TestServerErrorOnPostIsStillRetried()
+void TestServerErrorOnPostIsRetried()
 {
     Fixture f;
 
     int delivered = 0;
-    const RequestId id = f.executor->Submit(Post("https://example.test/grant"),
-                                                [&](const Completion&) { ++delivered; });
+    f.executor->Submit(Post("https://example.test/grant"),
+                       [&](const Completion&) { ++delivered; });
 
     CHECK(f.executor->Update());
 
-    // A 500 is a *received* response: the server told us it failed, so the request did not
-    // take effect and retrying is safe even for a POST. Only a lost response is ambiguous.
     f.transport->Complete(f.transport->Order().back(), 500, "boom");
     CHECK(f.executor->Update());
     CHECK_EQ_INT(delivered, 0);
@@ -863,6 +864,79 @@ void TestRequestIdToString()
     CHECK(RequestId(1).IsValid());
 }
 
+void TestFailureCarriesTheRequestId()
+{
+    // No retries, so the first failure is delivered rather than requeued.
+    QueueConfig config = DefaultQueue();
+    config.max_retries = 0;
+    Fixture f(config);
+
+    Completion last;
+    const RequestId id = f.executor->Submit(
+        Get("https://example.test/a"), [&](const Completion& c) { last = c; });
+
+    CHECK(f.executor->Update());
+    f.transport->Complete(f.transport->Order().back(), 500, "boom");
+    CHECK(!f.executor->Update());
+
+    // A support ticket is usually raised from a failure, not a success, so the id has to be
+    // on the error as well as in the log. `Error::request_id` documents itself as the id
+    // sent in `LL-Request-Id`.
+    CHECK(!last.error.Ok());
+    CHECK_EQ(last.error.request_id, id.ToString());
+}
+
+void TestTimeoutCarriesTheRequestId()
+{
+    QueueConfig config = DefaultQueue();
+    config.max_retries = 0;
+    Fixture f(config);
+
+    Completion last;
+    const RequestId id = f.executor->Submit(
+        Get("https://example.test/a"), [&](const Completion& c) { last = c; });
+
+    CHECK(f.executor->Update());
+
+    // Let it time out. With no retries the timeout is delivered immediately.
+    f.clock.Advance(300 * 1000);
+    CHECK(!f.executor->Update());
+
+    CHECK(!last.error.Ok());
+    CHECK(last.error.code == ErrorCode::Transport);
+    CHECK_EQ(last.error.request_id, id.ToString());
+}
+
+void TestRequestIdsAreUniqueAcrossClients()
+{
+    // Two clients in one process are legal (D20). A per-client counter would let both mint
+    // the same id, so a support ticket quoting "request 5" would be ambiguous.
+    Fixture a;
+    Fixture b;
+    const RequestId first =
+        a.executor->Submit(Get("https://example.test/a"), [](const Completion&) {});
+    const RequestId second =
+        b.executor->Submit(Get("https://example.test/a"), [](const Completion&) {});
+
+    CHECK(first.IsValid());
+    CHECK(second.IsValid());
+    CHECK(first != second);
+}
+
+void TestRequestIdNextIsMonotonic()
+{
+    const RequestId first = RequestId::Next();
+    const RequestId second = RequestId::Next();
+    const RequestId third = RequestId::Next();
+
+    CHECK(first.IsValid());
+    CHECK(first < second);
+    CHECK(second < third);
+
+    // Never invalid, even at the wrap point: 0 is skipped.
+    CHECK(RequestId::Next().IsValid());
+}
+
 void TestAbandonCancelsInFlightWithoutCallingBack()
 {
     Fixture f;
@@ -894,9 +968,9 @@ int main()
     TestClientErrorDoesNotRetry();
     TestRetryAfterIsHonoured();
     TestRetriesStopAtTheBudget();
-    TestTimedOutPostIsNotRetried();
+    TestTimedOutPostIsRetried();
     TestTimedOutGetIsRetried();
-    TestServerErrorOnPostIsStillRetried();
+    TestServerErrorOnPostIsRetried();
     TestConcurrencyCapIsRespected();
     TestFullQueueRejectsAndReportsOnNextUpdate();
     TestBackedUpQueueWaitsWhenDenyIsOff();
@@ -916,6 +990,10 @@ int main()
     TestIdenticalRequestsAreBothSent();
     TestIdenticalWritesAreBothSent();
     TestRequestIdToString();
+    TestFailureCarriesTheRequestId();
+    TestTimeoutCarriesTheRequestId();
+    TestRequestIdsAreUniqueAcrossClients();
+    TestRequestIdNextIsMonotonic();
     TestAbandonCancelsInFlightWithoutCallingBack();
 
     return testing::Report();

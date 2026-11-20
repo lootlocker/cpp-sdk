@@ -212,7 +212,7 @@ RequestId Executor::Submit(PendingRequest request, CompletionHandler on_done)
     }
 
     Entry entry;
-    entry.id = RequestId(m_next_id++);
+    entry.id = RequestId::Next();
     entry.request = std::move(request);
     if (on_done) {
         entry.on_done.push_back(std::move(on_done));
@@ -314,17 +314,27 @@ void Executor::FinishOrRetry(RequestId id, Completion completion, std::int64_t n
         ParseRetryAfter(retry_after, completion.error);
     }
 
+    // The id goes on the completion as well as the log, so a caller holding a failed result
+    // can quote the same id the server saw. `Error::request_id` documents itself as "also
+    // sent as the LL-Request-Id header", and a support ticket is usually raised from a
+    // failure, not a success - so leaving it empty on failure defeats the purpose.
+    completion.error.request_id = id.ToString();
+
     // --- Retry or deliver -------------------------------------------------------------
 
     const bool retryable = IsRetryableStatus(completion.status_code);
 
-    // R25: a non-idempotent request whose response was lost is never retried. A POST that
-    // timed out may have succeeded, and retrying it can double-grant. This is checked
-    // before the attempt budget because it is a correctness rule, not a policy knob.
-    const bool lost_response = completion.status_code == 0;
-    const bool may_retry = retryable && !(lost_response && !entry.request.idempotent);
-
-    if (may_retry && entry.attempts <= m_config.max_retries) {
+    // **A lost response is retried, whatever the method** (owner, 2026-11-20). This
+    // deliberately does not distinguish a POST from a GET.
+    //
+    // The earlier design carried a per-request `idempotent` flag and refused to retry a
+    // non-idempotent request whose response was lost, because a POST that timed out may
+    // have succeeded and retrying it can double-grant (R25). The owner's call is that the
+    // other SDKs do not do this and we should not either: the flag moves a correctness
+    // decision onto the caller, and a caller who forgets it gets a request that silently
+    // never retries. R25 is therefore an **accepted risk**, not a closed one - see the
+    // spec's risk table.
+    if (retryable && entry.attempts <= m_config.max_retries) {
         entry.in_flight = false;
         entry.transfer = 0;
         entry.ready_at_ms = now + BackoffMs(entry.attempts, completion);
@@ -333,10 +343,6 @@ void Executor::FinishOrRetry(RequestId id, Completion completion, std::int64_t n
 
     // Delivered. The entry is erased before the handlers run, so a handler that submits a
     // new request cannot invalidate the map under us.
-    //
-    // Every handler on the entry is called with the same completion. There is more than one
-    // only when a submission was deduplicated onto this entry, and each of those callers
-    // asked for the same thing, so each gets the same answer.
     for (CompletionHandler& handler : entry.on_done) {
         out_handlers.push_back(std::move(handler));
         out_completions.push_back(completion);
@@ -547,9 +553,8 @@ void Executor::FailAll(const std::string& reason)
         // branching on the code needs to tell "I cancelled this" from "the SDK could
         // not send this".
         completion.error = MakeError(ErrorCode::Transport, reason);
+        completion.error.request_id = entry.id.ToString();
 
-        // Every handler on the entry, because a deduplicated submission has more than one
-        // and each of those callers is waiting.
         for (CompletionHandler& handler : entry.on_done) {
             handlers.push_back(std::move(handler));
             completions.push_back(completion);

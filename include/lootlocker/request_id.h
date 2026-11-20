@@ -9,6 +9,11 @@
 //
 // It is also what `Cancel(RequestId)` will take when cancellation lands, so the return type
 // does not have to change for that.
+//
+// **The counter is process-wide, not per-client.** Two clients in one process are legal
+// (D20), and a per-client counter would let both mint id 5 - so a support ticket quoting
+// "request 5" would be ambiguous. Minting from one static counter makes the id unique
+// across the process, which is the whole point of a correlation id.
 
 #include <cstdint>
 #include <string>
@@ -22,6 +27,15 @@ public:
 
     explicit RequestId(std::uint64_t value) : m_value(value) {}
 
+    // Mint the next id. Process-wide and monotonic, so ids are unique across every client
+    // in the process and increasing in submission order.
+    //
+    // Never returns an invalid id: 0 is skipped, so a wrap cannot produce one. The wrap is
+    // unreachable in practice - a `uint64` at a million requests a second lasts longer than
+    // the hardware - but skipping 0 costs one comparison and removes the edge case
+    // entirely.
+    static RequestId Next();
+
     std::uint64_t Value() const { return m_value; }
 
     // False for the default-constructed id, which is what a rejected submission returns.
@@ -34,8 +48,12 @@ public:
     bool operator==(const RequestId& other) const { return m_value == other.m_value; }
     bool operator!=(const RequestId& other) const { return m_value != other.m_value; }
 
-    // Ordering, so an id can be a map key or sorted. Ids are assigned in submission order,
-    // so this is also submission order.
+    // Ordering exists so the queue can keep FIFO order among requests that are equally
+    // ready, and so an id can be a map key. Because ids are minted monotonically, this is
+    // also submission order within one client.
+    //
+    // It is deliberately not a documented guarantee: the other SDKs mint a GUID and have no
+    // ordering at all, and nothing in the public surface should come to depend on it.
     bool operator<(const RequestId& other) const { return m_value < other.m_value; }
 
 private:
