@@ -214,9 +214,7 @@ RequestId Executor::Submit(PendingRequest request, CompletionHandler on_done)
     Entry entry;
     entry.id = RequestId::Next();
     entry.request = std::move(request);
-    if (on_done) {
-        entry.on_done.push_back(std::move(on_done));
-    }
+    entry.on_done = std::move(on_done);
     entry.ready_at_ms = now;
 
     const RequestId id = entry.id;
@@ -341,12 +339,10 @@ void Executor::FinishOrRetry(RequestId id, Completion completion, std::int64_t n
         return;
     }
 
-    // Delivered. The entry is erased before the handlers run, so a handler that submits a
+    // Delivered. The entry is erased before the handler runs, so a handler that submits a
     // new request cannot invalidate the map under us.
-    for (CompletionHandler& handler : entry.on_done) {
-        out_handlers.push_back(std::move(handler));
-        out_completions.push_back(completion);
-    }
+    out_handlers.push_back(std::move(entry.on_done));
+    out_completions.push_back(std::move(completion));
     m_entries.erase(it);
 }
 
@@ -499,11 +495,9 @@ bool Executor::Update()
             // The id goes on the wire as `LL-Request-Id`, so a support ticket can be
             // matched to a server log line (D25).
             //
-            // Set here, at send time, rather than on the stored request. Two reasons: the
-            // stored request is what deduplication compares, so stamping it would make
-            // every request unique and dedupe would never fire; and a retry re-sends the
-            // same logical request, so it carries the same id, which is what makes a
-            // server log show one id across attempts.
+            // Set here, at send time, rather than on the stored request, so that a retry
+            // re-sends the same logical request with the same id - which is what makes a
+            // server log show one id across attempts rather than one per attempt.
             request.headers.Set("LL-Request-Id", entry.id.ToString());
 
             ++entry.attempts;
@@ -555,10 +549,8 @@ void Executor::FailAll(const std::string& reason)
         completion.error = MakeError(ErrorCode::Transport, reason);
         completion.error.request_id = entry.id.ToString();
 
-        for (CompletionHandler& handler : entry.on_done) {
-            handlers.push_back(std::move(handler));
-            completions.push_back(completion);
-        }
+        handlers.push_back(std::move(entry.on_done));
+        completions.push_back(std::move(completion));
     }
     m_entries.clear();
 
