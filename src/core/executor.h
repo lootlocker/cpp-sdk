@@ -39,17 +39,6 @@ struct PendingRequest {
     std::string url;
     HeaderMap   headers;
     std::string body;
-
-    // Whether a lost response may be retried (R25).
-    //
-    // A GET that timed out did not change anything, so retrying is free. A POST that timed
-    // out may have succeeded, and retrying it can double-grant. The default is `true`
-    // because most of the surface is reads; every write must set it to `false`
-    // deliberately, which is the right way round for a safety flag.
-    //
-    // This guards retries only. It does NOT enable any form of request merging: every
-    // submission is its own request, always (owner, 2026-11-19).
-    bool idempotent = true;
 };
 
 // The outcome of one request, delivered exactly once.
@@ -181,7 +170,6 @@ private:
     Clock&                         m_clock;
     std::weak_ptr<Logger>          m_logger;
 
-    std::uint64_t                  m_next_id = 1;
     std::map<RequestId, Entry>     m_entries;
 
     // Handlers for requests rejected at submit time. Bounded by how many the caller
