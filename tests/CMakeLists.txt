@@ -54,6 +54,12 @@ target_link_libraries(test_executor PRIVATE LootLocker::core lootlocker_compile_
 target_include_directories(test_executor PRIVATE ${CMAKE_SOURCE_DIR}/src/core)
 add_test(NAME executor COMMAND test_executor)
 
+# The rate limiter (T11a). Driven by a fake clock, so nothing sleeps.
+add_executable(test_rate_limiter test_rate_limiter.cpp)
+target_link_libraries(test_rate_limiter PRIVATE LootLocker::core lootlocker_compile_options)
+target_include_directories(test_rate_limiter PRIVATE ${CMAKE_SOURCE_DIR}/src/core)
+add_test(NAME rate_limiter COMMAND test_rate_limiter)
+
 # The end-to-end transport test (T11, owner 2026-11-13): a real round trip through the real
 # curl transport against a loopback server, plus the proof that `Config::transport` is
 # actually consulted.

@@ -43,14 +43,22 @@ bool IsRetryableStatus(int status_code)
 Executor::Executor(const QueueConfig& config, std::weak_ptr<IHttpTransport> transport,
                    Clock& clock, std::weak_ptr<Logger> logger)
     : m_config(config), m_transport(std::move(transport)), m_clock(clock),
-      m_logger(std::move(logger))
+      m_logger(std::move(logger)), m_rate_limiter(RateLimitConfig(), clock)
 {
 }
 
 Executor::Executor(const QueueConfig& config, std::weak_ptr<IHttpTransport> transport,
                    Clock& clock, std::weak_ptr<Logger> logger, Error config_error)
     : m_config(config), m_config_error(std::move(config_error)), m_transport(std::move(transport)),
-      m_clock(clock), m_logger(std::move(logger))
+      m_clock(clock), m_logger(std::move(logger)), m_rate_limiter(RateLimitConfig(), clock)
+{
+}
+
+Executor::Executor(const QueueConfig& config, const RateLimitConfig& rate_limit,
+                   std::weak_ptr<IHttpTransport> transport, Clock& clock,
+                   std::weak_ptr<Logger> logger, Error config_error)
+    : m_config(config), m_config_error(std::move(config_error)), m_transport(std::move(transport)),
+      m_clock(clock), m_logger(std::move(logger)), m_rate_limiter(rate_limit, clock)
 {
 }
 
@@ -476,6 +484,20 @@ bool Executor::Update()
 
         for (const RequestId id : ready) {
             if (static_cast<int>(InFlightCount()) >= m_config.max_in_flight) {
+                break;
+            }
+
+            // The client-side throttle (D25). A tripped request is **held, not dropped**:
+            // it stays queued and is promoted on a later `Update()` once the window clears.
+            // The caller sees nothing until then, because a rate limit is self-restraint,
+            // not an error.
+            //
+            // Checked here rather than at submit time, because the limiter counts requests
+            // that are actually sent. Counting at submit would throttle a caller for
+            // queueing work it never got to send.
+            if (!m_rate_limiter.TryAcquire()) {
+                // Nothing else can be promoted either: the limiter is a global gate, so
+                // breaking here is correct and avoids a pointless loop over the rest.
                 break;
             }
 
