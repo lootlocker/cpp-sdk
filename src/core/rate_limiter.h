@@ -38,11 +38,21 @@ public:
     RateLimiter(const RateLimiter&)            = delete;
     RateLimiter& operator=(const RateLimiter&) = delete;
 
+    // Whether a request may be sent now. Does not record anything.
+    //
+    // Split from `Commit` so the executor can check *before* starting a transfer and record
+    // only if the transfer actually started. `IHttpTransport::Start` may return 0, and a
+    // start that failed sent nothing - counting it would burn quota for a request that never
+    // left, and repeated failures could hold unrelated queued requests.
+    bool CanAcquire();
+    // Records one request against the window. Call only after `CanAcquire()` returned true
+    // and the transfer actually started.
+    void Commit();
+
     // Records one request and returns true when it may be sent now.
     //
-    // Returns false when the limiter is tripped, and records nothing in that case: a
-    // request that is not sent must not count against the window, or the limiter would
-    // keep itself tripped by counting the requests it is holding.
+    // Convenience for a caller that has nothing between the check and the send. The executor
+    // does not use it, because it has a `Start` call in between.
     bool TryAcquire();
 
     // True while the limiter is holding requests back.

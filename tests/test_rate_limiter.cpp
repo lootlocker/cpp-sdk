@@ -295,6 +295,65 @@ void TestCustomConstantsAreHonoured()
     CHECK(limiter.TryAcquire());
 }
 
+void TestNonDivisiblePolicyIsRejected()
+{
+    // 60 s with 7 s buckets does not divide. Silently shortening it would give an effective
+    // 56 s tripwire and a 168 s moving average while the config still advertises 60/180 -
+    // a different rate limit than the adopter asked for, with nothing to say so.
+    RateLimitConfig config = Defaults();
+    config.seconds_per_bucket = 7;
+
+    FakeClock clock;
+    RateLimiter limiter(config, clock);
+
+    // Rejected means the limiter is inert rather than silently misconfigured. It allows
+    // everything, which is the safe direction: a broken policy must not throttle a game.
+    for (int i = 0; i < 1000; ++i) {
+        CHECK(limiter.TryAcquire());
+    }
+    CHECK(!limiter.IsLimited());
+}
+
+void TestOverflowingBucketCountIsRejected()
+{
+    // A large frame count with a large bucket count would overflow `int` on the multiply and
+    // wrap negative - and a negative bucket count takes the "disabled" fast path, silently
+    // turning the limiter off for a config that looked valid.
+    RateLimitConfig config = Defaults();
+    config.tripwire_window_seconds = 2000000000;
+    config.seconds_per_bucket = 1;
+    config.moving_average_time_frames = 100;
+
+    FakeClock clock;
+    RateLimiter limiter(config, clock);
+
+    // Inert rather than negative, and no huge allocation.
+    for (int i = 0; i < 1000; ++i) {
+        CHECK(limiter.TryAcquire());
+    }
+    CHECK(!limiter.IsLimited());
+}
+void TestCommitIsSeparateFromTheCheck()
+{
+    // The executor checks, starts the transfer, and only then commits - because a `Start`
+    // that returned 0 sent nothing. This is the primitive that makes that possible.
+    FakeClock clock;
+    RateLimiter limiter(Defaults(), clock);
+
+    CHECK(limiter.CanAcquire());
+    CHECK_EQ_INT(limiter.TripwireCount(), 0);   // checking alone records nothing
+
+    limiter.Commit();
+    CHECK_EQ_INT(limiter.TripwireCount(), 1);
+
+    // A check that is never committed leaves the window untouched, so a failed start cannot
+    // burn quota.
+    for (int i = 0; i < 500; ++i) {
+        CHECK(limiter.CanAcquire());
+    }
+    CHECK_EQ_INT(limiter.TripwireCount(), 1);
+}
+
 } // namespace
 
 int main()
@@ -310,6 +369,9 @@ int main()
     TestResetClearsEverything();
     TestLongIdlePeriodClearsWithoutIterating();
     TestCustomConstantsAreHonoured();
+    TestNonDivisiblePolicyIsRejected();
+    TestOverflowingBucketCountIsRejected();
+    TestCommitIsSeparateFromTheCheck();
 
     return testing::Report();
 }

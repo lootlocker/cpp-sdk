@@ -1125,6 +1125,47 @@ void TestServerRateLimitIsHandledByRetryNotTheLimiter()
     CHECK_EQ_INT(last.attempts, 3);
 }
 
+// A transport that refuses to start anything, so the executor's start-failure path can be
+// exercised.
+class RefusingTransport : public IHttpTransport {
+public:
+    TransferId Start(const Request&) override { return 0; }
+    bool       Poll(TransferId, Response&) override { return false; }
+    void       Cancel(TransferId) override {}
+};
+
+void TestFailedStartDoesNotBurnQuota()
+{
+    // The limiter allows 3 in the window. Every start fails, so nothing is ever sent - and
+    // nothing should be counted. Counting a failed start would burn quota for a request that
+    // never left, and repeated failures could hold unrelated queued requests.
+    QueueConfig queue = DefaultQueue();
+    queue.max_retries = 0;
+
+    RateLimitConfig limit;
+    limit.enabled = true;
+    limit.tripwire_window_seconds = 10;
+    limit.max_requests_per_tripwire = 3;
+    limit.seconds_per_bucket = 10;
+    limit.moving_average_fraction = 1.0;
+    limit.moving_average_time_frames = 1;
+
+    auto transport = std::make_shared<RefusingTransport>();
+    auto logger = std::make_shared<RecordingLogger>();
+    FakeClock clock;
+    Executor executor(queue, limit, transport, clock, logger, Error());
+
+    int delivered = 0;
+    for (int i = 0; i < 10; ++i) {
+        executor.Submit(Get("https://example.test/a" + std::to_string(i)),
+                        [&delivered](const Completion&) { ++delivered; });
+    }
+
+    // Every one fails to start, so every one is delivered as a transport failure rather than
+    // being held by a limiter that thinks it sent something.
+    executor.Update();
+    CHECK_EQ_INT(delivered, 10);
+}
 void TestAbandonCancelsInFlightWithoutCallingBack()
 {
     Fixture f;
@@ -1185,6 +1226,7 @@ int main()
     TestRequestIdNextIsUniqueUnderConcurrency();
     TestTrippedRequestIsHeldThenDelivered();
     TestServerRateLimitIsHandledByRetryNotTheLimiter();
+    TestFailedStartDoesNotBurnQuota();
     TestAbandonCancelsInFlightWithoutCallingBack();
 
     return testing::Report();

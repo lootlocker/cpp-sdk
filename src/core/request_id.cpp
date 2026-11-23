@@ -27,10 +27,15 @@ RequestId RequestId::Next()
     // `fetch_add` it replaces.
     std::uint64_t current = g_next_request_id.load(std::memory_order_relaxed);
     for (;;) {
-        // Skip 0, which is the invalid id. Unreachable in practice - a uint64 at a million
-        // requests a second lasts longer than the hardware - but the loop makes the wrap
-        // safe by construction rather than by argument.
-        const std::uint64_t next = (current == 0) ? 1 : current + 1;
+        // Skip 0, which is the invalid id, and wrap from the maximum back to 1 rather than
+        // to 0. `current + 1` alone would store 0 at the wrap, and the *next* call would
+        // then return `RequestId(0)` - which is indistinguishable from a rejected
+        // submission and would collide with that map key.
+        //
+        // Unreachable in practice - a uint64 at a million requests a second lasts longer
+        // than the hardware - but the loop makes the invariant true by construction rather
+        // than by argument.
+        const std::uint64_t next = (current == 0 || current == UINT64_MAX) ? 1 : current + 1;
 
         if (g_next_request_id.compare_exchange_weak(current, next, std::memory_order_relaxed,
                                                     std::memory_order_relaxed)) {
