@@ -495,7 +495,7 @@ bool Executor::Update()
             // Checked here rather than at submit time, because the limiter counts requests
             // that are actually sent. Counting at submit would throttle a caller for
             // queueing work it never got to send.
-            if (!m_rate_limiter.TryAcquire()) {
+            if (!m_rate_limiter.CanAcquire()) {
                 // Nothing else can be promoted either: the limiter is a global gate, so
                 // breaking here is correct and avoids a pointless loop over the rest.
                 break;
@@ -540,6 +540,11 @@ bool Executor::Update()
 
             entry.transfer = transfer;
             entry.in_flight = true;
+
+            // Recorded only now, after the transfer actually started. A `Start` that
+            // returned 0 sent nothing, so counting it would burn quota for a request that
+            // never left - and repeated failures could hold unrelated queued requests.
+            m_rate_limiter.Commit();
         }
     }
 

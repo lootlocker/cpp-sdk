@@ -11,15 +11,37 @@ namespace {
 // so the fraction and the effective limit cannot disagree. `floor`, not round: the soft
 // threshold must never be more permissive than the fraction says, or a client could sit
 // above the intended rate indefinitely.
+//
+// Returns 0 for a configuration that cannot produce a usable window. That includes one whose
+// product would overflow `int`: a large `moving_average_time_frames` with a large bucket
+// count would otherwise wrap negative, and a negative bucket count takes the "disabled" fast
+// path - silently turning the limiter off for a config that looked valid.
 int DeriveBucketCount(const RateLimitConfig& config)
 {
-    if (config.seconds_per_bucket <= 0 || config.tripwire_window_seconds <= 0) {
+    if (config.seconds_per_bucket <= 0 || config.tripwire_window_seconds <= 0
+        || config.moving_average_time_frames <= 0) {
         return 0;
     }
+
+    // Reject a non-divisible policy rather than silently shortening the window. 60 s with
+    // 7 s buckets would otherwise become an effective 56 s tripwire and a 168 s moving
+    // average, while the config still advertises 60/180 - a different rate limit than the
+    // adopter asked for, with nothing to say so.
+    if (config.tripwire_window_seconds % config.seconds_per_bucket != 0) {
+        return 0;
+    }
+
     const int buckets_per_tripwire = config.tripwire_window_seconds / config.seconds_per_bucket;
     if (buckets_per_tripwire <= 0) {
         return 0;
     }
+
+    // Checked before multiplying, not after: the multiply itself is the undefined behaviour.
+    const int max_int = 2147483647;
+    if (buckets_per_tripwire > max_int / config.moving_average_time_frames) {
+        return 0;
+    }
+
     return buckets_per_tripwire * config.moving_average_time_frames;
 }
 
@@ -117,7 +139,7 @@ bool RateLimiter::WouldTrip() const
     return (projected / m_bucket_count) > m_per_bucket_limit;
 }
 
-bool RateLimiter::TryAcquire()
+bool RateLimiter::CanAcquire()
 {
     if (!m_config.enabled || m_bucket_count <= 0) {
         return true;
@@ -149,9 +171,25 @@ bool RateLimiter::TryAcquire()
         return false;
     }
 
+    return true;
+}
+
+void RateLimiter::Commit()
+{
+    if (!m_config.enabled || m_bucket_count <= 0) {
+        return;
+    }
     m_buckets[static_cast<std::size_t>(m_last_bucket)]++;
     m_total++;
     m_total_in_tripwire++;
+}
+
+bool RateLimiter::TryAcquire()
+{
+    if (!CanAcquire()) {
+        return false;
+    }
+    Commit();
     return true;
 }
 
