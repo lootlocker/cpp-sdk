@@ -140,6 +140,7 @@ add_library(lootlocker_core STATIC
     src/core/config_obfuscation.cpp
     src/core/header_map.cpp
     src/core/request_id.cpp
+    src/core/rate_limiter.cpp
     src/core/executor.cpp
     src/core/client.cpp
 )

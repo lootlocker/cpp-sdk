@@ -30,6 +30,7 @@ class FakeClock : public Clock {
 public:
     std::int64_t NowMs() override { return m_now; }
     void Advance(std::int64_t ms) { m_now += ms; }
+    void AdvanceSeconds(int seconds) { m_now += static_cast<std::int64_t>(seconds) * 1000; }
 
 private:
     std::int64_t m_now = 1000;   // non-zero, so "not set" is distinguishable
@@ -1004,6 +1005,126 @@ void TestRequestIdNextIsUniqueUnderConcurrency()
     CHECK(all.front() != 0);
 }
 
+// --- The rate limiter's integration with the queue (T11a) ------------------------------
+
+// A fixture whose limiter is tight enough to trip in a few requests, so the integration is
+// testable without 280 submissions.
+struct LimitedFixture {
+    LimitedFixture()
+        : transport(std::make_shared<FakeHttpTransport>()),
+          logger(std::make_shared<RecordingLogger>())
+    {
+        QueueConfig queue = DefaultQueue();
+        queue.max_in_flight = 50;
+
+        RateLimitConfig limit;
+        limit.enabled = true;
+        limit.tripwire_window_seconds = 10;
+        limit.max_requests_per_tripwire = 3;
+        limit.seconds_per_bucket = 10;
+        limit.moving_average_fraction = 1.0;
+        limit.moving_average_time_frames = 1;
+
+        executor.reset(new Executor(queue, limit, transport, clock, logger, Error()));
+    }
+
+    std::shared_ptr<FakeHttpTransport> transport;
+    std::shared_ptr<RecordingLogger>   logger;
+    FakeClock                          clock;
+    std::unique_ptr<Executor>          executor;
+};
+
+void TestTrippedRequestIsHeldThenDelivered()
+{
+    LimitedFixture f;
+
+    int delivered = 0;
+    for (int i = 0; i < 5; ++i) {
+        f.executor->Submit(Get("https://example.test/a" + std::to_string(i)),
+                           [&delivered](const Completion&) { ++delivered; });
+    }
+
+    // The limiter allows 3 in the window, so only 3 are sent. The other 2 are held, not
+    // dropped and not failed.
+    CHECK(f.executor->Update());
+    CHECK_EQ_INT(static_cast<long long>(f.transport->StartCount()), 3);
+    CHECK_EQ_INT(delivered, 0);
+
+    // Complete the three that went out.
+    for (const auto transfer : f.transport->Order()) {
+        f.transport->Complete(transfer, 200, "{}");
+    }
+    CHECK(f.executor->Update());
+    CHECK_EQ_INT(delivered, 3);
+
+    // The two held requests are still queued, and `Update()` still reports work to do -
+    // which is what stops a `while (Update())` loop from exiting early and losing them.
+    CHECK(f.executor->Update());
+    CHECK_EQ_INT(static_cast<long long>(f.transport->StartCount()), 3);
+
+    // Once the window clears they are sent, without the caller doing anything.
+    f.clock.AdvanceSeconds(11);
+    CHECK(f.executor->Update());
+    CHECK_EQ_INT(static_cast<long long>(f.transport->StartCount()), 5);
+
+    for (const auto transfer : f.transport->Order()) {
+        f.transport->Complete(transfer, 200, "{}");
+    }
+    CHECK(!f.executor->Update());
+    CHECK_EQ_INT(delivered, 5);
+}
+
+void TestServerRateLimitIsHandledByRetryNotTheLimiter()
+{
+    // The limiter is disabled, so a 429 can only be handled by the retry policy. This is
+    // the separation D25 insists on: the limiter is client-side self-restraint, and a
+    // server 429 is a different thing entirely.
+    QueueConfig queue = DefaultQueue();
+    queue.max_retries = 2;
+
+    RateLimitConfig limit;
+    limit.enabled = false;
+
+    auto transport = std::make_shared<FakeHttpTransport>();
+    auto logger = std::make_shared<RecordingLogger>();
+    FakeClock clock;
+    Executor executor(queue, limit, transport, clock, logger, Error());
+
+    int delivered = 0;
+    Completion last;
+    executor.Submit(Get("https://example.test/a"), [&](const Completion& c) {
+        ++delivered;
+        last = c;
+    });
+
+    CHECK(executor.Update());
+    transport->Complete(transport->Order().back(), 429, "{}");
+    CHECK(executor.Update());
+
+    // Retried by the retry policy, not held by the limiter.
+    CHECK_EQ_INT(delivered, 0);
+    clock.Advance(50);
+    CHECK(executor.Update());
+    CHECK_EQ_INT(static_cast<long long>(transport->StartCount()), 2);
+
+    // Attempt 2 fails the same way, so it is requeued again with a doubled delay.
+    transport->Complete(transport->Order().back(), 429, "{}");
+    CHECK(executor.Update());
+    CHECK_EQ_INT(delivered, 0);
+    clock.Advance(100);
+    CHECK(executor.Update());
+    CHECK_EQ_INT(static_cast<long long>(transport->StartCount()), 3);
+
+    // Attempt 3 exhausts the budget, so the failure is delivered. It is `RateLimited`
+    // because the server said so - the limiter is disabled and had no part in it.
+    transport->Complete(transport->Order().back(), 429, "{}");
+    CHECK(!executor.Update());
+
+    CHECK_EQ_INT(delivered, 1);
+    CHECK(last.error.code == ErrorCode::RateLimited);
+    CHECK_EQ_INT(last.attempts, 3);
+}
+
 void TestAbandonCancelsInFlightWithoutCallingBack()
 {
     Fixture f;
@@ -1062,6 +1183,8 @@ int main()
     TestRequestIdsAreUniqueAcrossClients();
     TestRequestIdNextIsMonotonic();
     TestRequestIdNextIsUniqueUnderConcurrency();
+    TestTrippedRequestIsHeldThenDelivered();
+    TestServerRateLimitIsHandledByRetryNotTheLimiter();
     TestAbandonCancelsInFlightWithoutCallingBack();
 
     return testing::Report();

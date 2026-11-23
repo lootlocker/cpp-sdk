@@ -18,6 +18,7 @@
 #include <lootlocker/result.h>
 
 #include "clock.h"
+#include "rate_limiter.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -68,6 +69,12 @@ public:
     // The same, plus the config error the client found. A non-empty error makes every
     // submission reject with it, which is how an inert client still delivers its handlers.
     Executor(const QueueConfig& config, std::weak_ptr<IHttpTransport> transport, Clock& clock,
+             std::weak_ptr<Logger> logger, Error config_error);
+
+    // The same, plus the rate limiter's policy (D25). The limiter is constructed from it and
+    // shares the executor's clock, so a test drives both with one fake.
+    Executor(const QueueConfig& config, const RateLimitConfig& rate_limit,
+             std::weak_ptr<IHttpTransport> transport, Clock& clock,
              std::weak_ptr<Logger> logger, Error config_error);
     ~Executor();
 
@@ -170,6 +177,10 @@ private:
     std::weak_ptr<IHttpTransport>  m_transport;
     Clock&                         m_clock;
     std::weak_ptr<Logger>          m_logger;
+
+    // The client-side throttle (D25). Held by value: it is small, it shares the executor's
+    // clock, and it has no reason to outlive the executor.
+    RateLimiter m_rate_limiter;
 
     std::map<RequestId, Entry>     m_entries;
 
