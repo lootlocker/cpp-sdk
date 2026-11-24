@@ -312,6 +312,34 @@ void TestInvalidConfigMakesTheClientInert()
     CHECK_EQ_INT(static_cast<long long>(fake->StartCount()), 0);
 }
 
+void TestInvalidPolicyDoesNotAllocateInTheClient()
+{
+    // `ValidateConfig` rejects an oversized policy, but the client used to pass it straight
+    // to the executor anyway - so a rejected 2-billion-second window still derived 2 billion
+    // buckets and attempted a multi-gigabyte allocation during construction. In a
+    // no-exceptions build that terminates the client, which defeats the point of validating.
+    Config config;
+    config.domain_key = "1g9glch3";
+    config.game_key = "prod_1c52468fc6e8420c955e3b6c303ea8cc";
+    config.game_version = "1.2.1";
+    config.rate_limit.tripwire_window_seconds = 2000000000;
+    config.rate_limit.seconds_per_bucket = 1;
+    config.rate_limit.moving_average_time_frames = 1;
+
+    auto fake = std::make_shared<FakeHttpTransport>();
+    config.transport = fake;
+
+    // The assertion is that this returns at all rather than exhausting memory.
+    Client client(config);
+
+    CHECK(!client.ConfigError().Ok());
+    CHECK(client.ConfigError().code == ErrorCode::InvalidConfig);
+
+    // And it is inert, as an invalid client should be.
+    CHECK(!client.Update());
+    CHECK_EQ_INT(static_cast<long long>(fake->StartCount()), 0);
+}
+
 } // namespace
 
 int main()
@@ -319,6 +347,7 @@ int main()
     TestInjectedTransportIsUsedByTheClient();
     TestSetTransportReplacesTheInjectedOne();
     TestInvalidConfigMakesTheClientInert();
+    TestInvalidPolicyDoesNotAllocateInTheClient();
 
 #if defined(LOOTLOCKER_HAVE_CURL)
     TestRealRoundTripThroughCurl();
