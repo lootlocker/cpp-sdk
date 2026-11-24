@@ -54,62 +54,100 @@ RateLimiter::RateLimiter(const RateLimitConfig& config, Clock& clock)
     if (m_bucket_count > 0) {
         m_buckets_per_tripwire = config.tripwire_window_seconds / config.seconds_per_bucket;
         m_per_bucket_limit = config.PerBucketLimit();
-        m_buckets.assign(static_cast<std::size_t>(m_bucket_count), 0);
+
+        // A fixed-size array, allocated once. `std::atomic` is neither copyable nor movable,
+        // so a vector cannot hold it.
+        m_buckets.reset(new std::atomic<int>[static_cast<std::size_t>(m_bucket_count)]);
+        for (int i = 0; i < m_bucket_count; ++i) {
+            m_buckets[static_cast<std::size_t>(i)].store(0, std::memory_order_relaxed);
+        }
     }
 }
 
 void RateLimiter::Reset()
 {
-    std::fill(m_buckets.begin(), m_buckets.end(), 0);
-    m_last_bucket = -1;
-    m_last_bucket_change_ms = 0;
-    m_started = false;
-    m_total = 0;
-    m_total_in_tripwire = 0;
-    m_limited = false;
-    m_resolves_at_ms = 0;
+        for (int i = 0; i < m_bucket_count; ++i) {
+            m_buckets[static_cast<std::size_t>(i)].store(0, std::memory_order_relaxed);
+        }
+    m_last_bucket.store(-1, std::memory_order_relaxed);
+    m_ms_into_bucket.store(0, std::memory_order_relaxed);
+    m_started.store(false, std::memory_order_relaxed);
+    m_total.store(0, std::memory_order_relaxed);
+    m_total_in_tripwire.store(0, std::memory_order_relaxed);
+    m_limited.store(false, std::memory_order_relaxed);
+    m_ms_until_clear.store(0, std::memory_order_relaxed);
 }
 
-void RateLimiter::Advance(std::int64_t now_ms)
+void RateLimiter::Tick(std::int64_t delta_ms)
 {
     if (m_bucket_count <= 0) {
         return;
     }
 
+    // The first tick initialises bucket 0, even with a zero delta. Without this the limiter
+    // would stay unstarted until time actually passed, and `Commit` would write to bucket -1.
+    if (!m_started.load(std::memory_order_relaxed)) {
+        m_started.store(true, std::memory_order_relaxed);
+        m_last_bucket.store(0, std::memory_order_relaxed);
+        m_ms_into_bucket.store(0, std::memory_order_relaxed);
+        return;
+    }
+
+    if (delta_ms <= 0) {
+        return;
+    }
+
+    // The countdown to clearing is a duration, so it simply decreases. Clamped at zero so a
+    // long idle period cannot make it negative and then take a whole window to climb back.
+    if (m_limited.load(std::memory_order_relaxed)) {
+        std::int64_t remaining = m_ms_until_clear.load(std::memory_order_relaxed) - delta_ms;
+        if (remaining < 0) {
+            remaining = 0;
+        }
+        m_ms_until_clear.store(remaining, std::memory_order_relaxed);
+    }
+
+    SlideWindow(delta_ms);
+}
+
+void RateLimiter::SlideWindow(std::int64_t delta_ms)
+{
     const std::int64_t bucket_ms = static_cast<std::int64_t>(m_config.seconds_per_bucket) * 1000;
 
-    // The first call initialises bucket 0 rather than trying to measure elapsed time from a
-    // sentinel.
-    if (!m_started) {
-        m_started = true;
-        m_last_bucket = 0;
-        m_last_bucket_change_ms = now_ms;
+    const std::int64_t ms_into_bucket =
+        m_ms_into_bucket.load(std::memory_order_relaxed) + delta_ms;
+
+    const std::int64_t numberOfBucketsTraversed = ms_into_bucket / bucket_ms;
+    if (numberOfBucketsTraversed == 0) {
+        m_ms_into_bucket.store(ms_into_bucket, std::memory_order_relaxed);
         return;
     }
 
-    const std::int64_t elapsed = now_ms - m_last_bucket_change_ms;
-    if (elapsed < bucket_ms) {
+    // Keep only the remainder, so sub-bucket time carries forward and cannot accumulate as
+    // drift over a long run.
+    m_ms_into_bucket.store(ms_into_bucket - numberOfBucketsTraversed * bucket_ms,
+                           std::memory_order_relaxed);
+
+    const int last_bucket = m_last_bucket.load(std::memory_order_relaxed);
+
+    // More buckets elapsed than exist: everything has aged out, so clear rather than looping
+    // over a window that is entirely stale.
+    if (numberOfBucketsTraversed >= m_bucket_count) {
+        for (int i = 0; i < m_bucket_count; ++i) {
+            m_buckets[static_cast<std::size_t>(i)].store(0, std::memory_order_relaxed);
+        }
+        m_total.store(0, std::memory_order_relaxed);
+        m_total_in_tripwire.store(0, std::memory_order_relaxed);
+        m_last_bucket.store(static_cast<int>(numberOfBucketsTraversed % m_bucket_count),
+                            std::memory_order_relaxed);
         return;
     }
 
-    const std::int64_t moved = elapsed / bucket_ms;
+    int total = m_total.load(std::memory_order_relaxed);
+    int total_in_tripwire = m_total_in_tripwire.load(std::memory_order_relaxed);
 
-    // Snap to the bucket boundary rather than the raw detection time, so sub-bucket
-    // remainder cannot accumulate as drift over a long run.
-    m_last_bucket_change_ms += moved * bucket_ms;
-
-    // More buckets elapsed than exist: everything has aged out, so clear rather than
-    // looping over a window that is entirely stale.
-    if (moved >= m_bucket_count) {
-        std::fill(m_buckets.begin(), m_buckets.end(), 0);
-        m_total = 0;
-        m_total_in_tripwire = 0;
-        m_last_bucket = static_cast<int>(moved % m_bucket_count);
-        return;
-    }
-
-    for (std::int64_t step = 1; step <= moved; ++step) {
-        const int bucket = static_cast<int>((m_last_bucket + step) % m_bucket_count);
+    for (std::int64_t step = 1; step <= numberOfBucketsTraversed; ++step) {
+        const int bucket = static_cast<int>((last_bucket + step) % m_bucket_count);
 
         // The bucket exactly one tripwire window behind this one is sliding out of the
         // tripwire window, so its count leaves that total.
@@ -118,60 +156,45 @@ void RateLimiter::Advance(std::int64_t now_ms)
             leaving_tripwire += m_bucket_count;
         }
 
-        m_total_in_tripwire -= m_buckets[static_cast<std::size_t>(leaving_tripwire)];
-        m_total -= m_buckets[static_cast<std::size_t>(bucket)];
-        m_buckets[static_cast<std::size_t>(bucket)] = 0;
+        total_in_tripwire -= m_buckets[static_cast<std::size_t>(leaving_tripwire)].load(
+            std::memory_order_relaxed);
+        total -= m_buckets[static_cast<std::size_t>(bucket)].load(std::memory_order_relaxed);
+        m_buckets[static_cast<std::size_t>(bucket)].store(0, std::memory_order_relaxed);
     }
 
-    m_last_bucket = static_cast<int>((m_last_bucket + moved) % m_bucket_count);
+    m_total.store(total, std::memory_order_relaxed);
+    m_total_in_tripwire.store(total_in_tripwire, std::memory_order_relaxed);
+    m_last_bucket.store(static_cast<int>((last_bucket + numberOfBucketsTraversed) % m_bucket_count),
+                        std::memory_order_relaxed);
 }
 
 bool RateLimiter::WouldTrip() const
 {
     // Tripwire: this request would take the window to the cap.
-    if (m_total_in_tripwire + 1 > m_config.max_requests_per_tripwire) {
+    if (m_total_in_tripwire.load(std::memory_order_relaxed) + 1
+        > m_config.max_requests_per_tripwire) {
         return true;
     }
 
     // Moving average: the per-bucket average across the whole window would exceed the
     // derived limit. Integer division, matching the reference implementations.
-    const int projected = m_total + 1;
+    const int projected = m_total.load(std::memory_order_relaxed) + 1;
     return (projected / m_bucket_count) > m_per_bucket_limit;
 }
 
-bool RateLimiter::CanAcquire()
+bool RateLimiter::CanAcquire() const
 {
     if (!m_config.enabled || m_bucket_count <= 0) {
         return true;
     }
 
-    const std::int64_t now = m_clock.NowMs();
-    Advance(now);
-
     // While limited, nothing is counted. A held request has not been sent, so counting it
     // would keep the limiter tripped by its own backlog - the window would never drain.
-    if (m_limited) {
-        if (m_total <= 0) {
-            m_limited = false;
-            m_resolves_at_ms = 0;
-        } else {
-            return false;
-        }
+    if (m_limited.load(std::memory_order_relaxed)) {
+        return m_total.load(std::memory_order_relaxed) <= 0;
     }
 
-    if (WouldTrip()) {
-        m_limited = true;
-
-        // The limit clears once everything currently counted has aged out of the window.
-        // Derived from the current bucket boundary plus the full window, so the estimate
-        // does not drift with sub-bucket remainder.
-        const std::int64_t window_ms =
-            static_cast<std::int64_t>(m_bucket_count) * m_config.seconds_per_bucket * 1000;
-        m_resolves_at_ms = m_last_bucket_change_ms + window_ms;
-        return false;
-    }
-
-    return true;
+    return !WouldTrip();
 }
 
 void RateLimiter::Commit()
@@ -179,26 +202,54 @@ void RateLimiter::Commit()
     if (!m_config.enabled || m_bucket_count <= 0) {
         return;
     }
-    m_buckets[static_cast<std::size_t>(m_last_bucket)]++;
-    m_total++;
-    m_total_in_tripwire++;
-}
 
-bool RateLimiter::TryAcquire()
-{
-    if (!CanAcquire()) {
-        return false;
+    // Defensive: `Tick` initialises bucket 0, so this cannot happen through the executor.
+    // But writing to `m_buckets[-1]` is a stack overrun rather than a wrong number, so the
+    // guard is worth the branch.
+    if (!m_started.load(std::memory_order_relaxed)) {
+        return;
     }
-    Commit();
-    return true;
+
+    // The window has drained, so the limit is lifted. `IsLimited()` derives from `m_total`
+    // as well, so this is belt-and-braces rather than the only place it clears.
+    if (m_limited.load(std::memory_order_relaxed)
+        && m_total.load(std::memory_order_relaxed) <= 0) {
+        m_limited.store(false, std::memory_order_relaxed);
+        m_ms_until_clear.store(0, std::memory_order_relaxed);
+    }
+
+    const int last_bucket = m_last_bucket.load(std::memory_order_relaxed);
+    m_buckets[static_cast<std::size_t>(last_bucket)].fetch_add(1, std::memory_order_relaxed);
+    m_total.fetch_add(1, std::memory_order_relaxed);
+    m_total_in_tripwire.fetch_add(1, std::memory_order_relaxed);
+
+    // `IsLimited()` reports whether the *next* request would be refused, which is what
+    // `CanAcquire()` will say. Recording it here keeps the two in agreement: without this,
+    // `CanAcquire()` would refuse while `IsLimited()` still said false.
+    //
+    // The request that *reaches* the cap is allowed - the cap is "more than 280", not "280" -
+    // so this is `WouldTrip()` after the increment, not before it.
+    if (WouldTrip()) {
+        m_limited.store(true, std::memory_order_relaxed);
+
+        // The limit clears once everything currently counted has aged out of the window,
+        // plus whatever is left of the current bucket.
+        const std::int64_t window_ms =
+            static_cast<std::int64_t>(m_bucket_count) * m_config.seconds_per_bucket * 1000;
+        const std::int64_t bucket_ms =
+            static_cast<std::int64_t>(m_config.seconds_per_bucket) * 1000;
+        m_ms_until_clear.store(
+            window_ms + (bucket_ms - m_ms_into_bucket.load(std::memory_order_relaxed)),
+            std::memory_order_relaxed);
+    }
 }
 
 int RateLimiter::SecondsUntilClear() const
 {
-    if (!m_limited) {
+    if (!IsLimited()) {
         return 0;
     }
-    const std::int64_t remaining = m_resolves_at_ms - m_clock.NowMs();
+    const std::int64_t remaining = m_ms_until_clear.load(std::memory_order_relaxed);
     if (remaining <= 0) {
         return 0;
     }
