@@ -79,7 +79,17 @@ Client::Client(const Config& config) : m_impl(new Impl())
 
     core::ExecutorSettings settings;
     settings.queue = config.queue;
+
+    // An invalid config means the policy was never validated, so it must not reach the
+    // limiter: a rejected 2-billion-second window would still derive 2 billion buckets and
+    // attempt a multi-gigabyte allocation during construction, which in a no-exceptions
+    // build terminates the client. The client is inert anyway, so a disabled limiter is
+    // exactly right.
     settings.rate_limit = config.rate_limit;
+    if (!m_impl->config_error.Ok()) {
+        settings.rate_limit.enabled = false;
+    }
+
     settings.transport = transport;
     settings.clock = &m_impl->clock;
     settings.logger = logger;
