@@ -194,6 +194,7 @@ private:
     std::weak_ptr<Logger>          m_logger;
 
     std::int64_t m_last_tick_ms = 0;
+    bool         m_has_ticked = false;
 
     // The client-side throttle (D25). Held by value: it is small, it is ticked by `Update()`,
     // and it has no reason to outlive the executor.

@@ -348,7 +348,16 @@ bool Executor::Update()
     // The executor is the one place that reads the clock, and it pushes the delta into every
     // tickable component. A component that read the clock itself would advance only when
     // someone happened to ask it something, which is how the limiter used to work.
-    const std::int64_t delta_ms = (m_last_tick_ms == 0) ? 0 : now - m_last_tick_ms;
+    //
+    // Initialisation is tracked separately from the timestamp. `Clock` only promises
+    // monotonic milliseconds, not a non-zero origin, so a clock that legitimately starts at 0
+    // would otherwise leave `m_last_tick_ms` at 0 for ever and compute a delta of 0 every
+    // time - the limiter's buckets would never advance and held requests would stay blocked.
+    std::int64_t delta_ms = 0;
+    if (m_has_ticked) {
+        delta_ms = now - m_last_tick_ms;
+    }
+    m_has_ticked = true;
     m_last_tick_ms = now;
     m_rate_limiter.Tick(delta_ms);
 
