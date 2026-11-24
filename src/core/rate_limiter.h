@@ -33,6 +33,16 @@
 namespace lootlocker {
 namespace core {
 
+// The memory order used throughout the limiter.
+//
+// Relaxed is deliberate: the requirement is that each field is read and written atomically,
+// not that other threads observe any particular order between them. A stronger order would
+// buy nothing here and cost on the hot path.
+//
+// Named once so the intent is stated in one place rather than repeated at every access, and
+// so a future change to the ordering is one edit rather than forty.
+constexpr std::memory_order kRelaxed = std::memory_order_relaxed;
+
 class RateLimiter {
 public:
     RateLimiter(const RateLimitConfig& config, Clock& clock);

@@ -1195,6 +1195,68 @@ void TestFailedStartDoesNotBurnQuota()
     executor.Update();
     CHECK_EQ_INT(delivered, 10);
 }
+// A clock that starts at 0, which `Clock` permits: it only promises monotonic milliseconds,
+// not a non-zero origin.
+class ZeroOriginClock : public Clock {
+public:
+    std::int64_t NowMs() override { return m_now; }
+    void Advance(std::int64_t ms) { m_now += ms; }
+
+private:
+    std::int64_t m_now = 0;
+};
+
+void TestZeroOriginClockStillAdvances()
+{
+    // The executor used 0 as its "no previous tick" sentinel, so a clock that legitimately
+    // started at 0 left `m_last_tick_ms` at 0 for ever and computed a delta of 0 every time -
+    // the limiter's buckets never advanced and held requests stayed blocked indefinitely.
+    QueueConfig queue = DefaultQueue();
+    queue.max_retries = 0;
+
+    RateLimitConfig limit;
+    limit.enabled = true;
+    limit.tripwire_window_seconds = 10;
+    limit.max_requests_per_tripwire = 3;
+    limit.seconds_per_bucket = 10;
+    limit.moving_average_fraction = 1.0;
+    limit.moving_average_time_frames = 1;
+
+    auto transport = std::make_shared<FakeHttpTransport>();
+    auto logger = std::make_shared<RecordingLogger>();
+    ZeroOriginClock clock;
+
+    ExecutorSettings settings;
+    settings.queue = queue;
+    settings.rate_limit = limit;
+    settings.transport = transport;
+    settings.clock = &clock;
+    settings.logger = logger;
+    Executor executor(settings);
+
+    int delivered = 0;
+    for (int i = 0; i < 5; ++i) {
+        executor.Submit(Get("https://example.test/a" + std::to_string(i)),
+                        [&delivered](const Completion&) { ++delivered; });
+    }
+
+    // Three go out, two are held.
+    CHECK(executor.Update());
+    CHECK_EQ_INT(static_cast<long long>(transport->StartCount()), 3);
+
+    for (const auto transfer : transport->Order()) {
+        transport->Complete(transfer, 200, "{}");
+    }
+    executor.Update();
+    CHECK_EQ_INT(delivered, 3);
+
+    // The clock starts at 0, so this is the case that used to never advance. Past the window,
+    // the held two must be sent.
+    clock.Advance(11000);
+    CHECK(executor.Update());
+    CHECK_EQ_INT(static_cast<long long>(transport->StartCount()), 5);
+}
+
 void TestAbandonCancelsInFlightWithoutCallingBack()
 {
     Fixture f;
@@ -1256,6 +1318,7 @@ int main()
     TestTrippedRequestIsHeldThenDelivered();
     TestServerRateLimitIsHandledByRetryNotTheLimiter();
     TestFailedStartDoesNotBurnQuota();
+    TestZeroOriginClockStillAdvances();
     TestAbandonCancelsInFlightWithoutCallingBack();
 
     return testing::Report();

@@ -221,6 +221,33 @@ Error ValidateConfig(const Config& config)
             return Invalid("rate_limit.moving_average_time_frames must be positive");
         }
 
+        // The window must divide evenly into buckets. A non-divisible policy silently
+        // shortens the window - 60 s with 7 s buckets becomes an effective 56 s tripwire and
+        // a 168 s moving average - so the adopter gets a different rate limit than they
+        // asked for, with nothing to say so.
+        if (config.rate_limit.tripwire_window_seconds % config.rate_limit.seconds_per_bucket
+            != 0) {
+            return Invalid("rate_limit.tripwire_window_seconds must be a multiple of "
+                           "seconds_per_bucket");
+        }
+
+        // The derived bucket count must be bounded, because it is an allocation. Without
+        // this, a large window with 1 s buckets asks for billions of buckets - gigabytes of
+        // atomics - and in a no-exceptions build that terminates the client during
+        // construction.
+        //
+        // The bound is generous: the defaults derive 36, and even a 1-hour window with 1 s
+        // buckets over 3 frames is 10,800. Anything past this is a typo rather than a policy.
+        const long long buckets_per_tripwire =
+            config.rate_limit.tripwire_window_seconds / config.rate_limit.seconds_per_bucket;
+        const long long bucket_count =
+            buckets_per_tripwire * config.rate_limit.moving_average_time_frames;
+        if (bucket_count > 100000) {
+            return Invalid("rate_limit settings derive " + std::to_string(bucket_count)
+                           + " buckets, which exceeds the limit of 100000; raise "
+                             "seconds_per_bucket or lower moving_average_time_frames");
+        }
+
         // The fraction must be finite and in (0, 1]. A NaN or an out-of-range value would
         // make PerBucketLimit() produce a nonsense threshold.
         const double f = config.rate_limit.moving_average_fraction;

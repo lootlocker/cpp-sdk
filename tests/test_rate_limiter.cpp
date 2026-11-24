@@ -327,34 +327,60 @@ void TestNonDivisiblePolicyIsRejected()
     // 60 s with 7 s buckets does not divide. Silently shortening it would give an effective
     // 56 s tripwire and a 168 s moving average while the config still advertises 60/180 -
     // a different rate limit than the adopter asked for, with nothing to say so.
+    //
+    // Rejected at validation, not just at construction: a `Client` built from this config
+    // must fail rather than silently run unthrottled.
     RateLimitConfig config = Defaults();
     config.seconds_per_bucket = 7;
 
-    FakeClock clock;
-    RateLimiter limiter(config, clock);
+    Config full;
+    full.domain_key = "1g9glch3";
+    full.game_key = "prod_1c52468fc6e8420c955e3b6c303ea8cc";
+    full.game_version = "1.2.1";
+    full.rate_limit = config;
 
-    // Rejected means the limiter is inert rather than silently misconfigured. It allows
-    // everything, which is the safe direction: a broken policy must not throttle a game.
-    for (int i = 0; i < 1000; ++i) {
-        CHECK(Acquire(limiter, clock));
-    }
-    CHECK(!limiter.IsLimited());
+    const Error error = ValidateConfig(full);
+    CHECK(!error.Ok());
+    CHECK(error.code == ErrorCode::InvalidConfig);
+    CHECK(error.message.find("multiple") != std::string::npos);
 }
 
 void TestOverflowingBucketCountIsRejected()
 {
-    // A large frame count with a large bucket count would overflow `int` on the multiply and
-    // wrap negative - and a negative bucket count takes the "disabled" fast path, silently
-    // turning the limiter off for a config that looked valid.
+    // A large window with 1 s buckets asks for billions of buckets - gigabytes of atomics -
+    // and in a no-exceptions build that terminates the client during construction. Rejected
+    // at validation so it cannot reach the allocator.
     RateLimitConfig config = Defaults();
     config.tripwire_window_seconds = 2000000000;
     config.seconds_per_bucket = 1;
-    config.moving_average_time_frames = 100;
+    config.moving_average_time_frames = 1;
+
+    Config full;
+    full.domain_key = "1g9glch3";
+    full.game_key = "prod_1c52468fc6e8420c955e3b6c303ea8cc";
+    full.game_version = "1.2.1";
+    full.rate_limit = config;
+
+    const Error error = ValidateConfig(full);
+    CHECK(!error.Ok());
+    CHECK(error.code == ErrorCode::InvalidConfig);
+    CHECK(error.message.find("buckets") != std::string::npos);
+}
+
+void TestDisabledLimiterAllocatesNothing()
+{
+    // A disabled limiter must not derive or allocate a bucket array at all: the derivation
+    // happens before the allocation guard, so a disabled policy with a huge window would
+    // otherwise still try to allocate.
+    RateLimitConfig config = Defaults();
+    config.enabled = false;
+    config.tripwire_window_seconds = 2000000000;
+    config.seconds_per_bucket = 1;
+    config.moving_average_time_frames = 1;
 
     FakeClock clock;
     RateLimiter limiter(config, clock);
 
-    // Inert rather than negative, and no huge allocation.
     for (int i = 0; i < 1000; ++i) {
         CHECK(Acquire(limiter, clock));
     }
@@ -402,6 +428,7 @@ int main()
     TestCustomConstantsAreHonoured();
     TestNonDivisiblePolicyIsRejected();
     TestOverflowingBucketCountIsRejected();
+    TestDisabledLimiterAllocatesNothing();
     TestCommitIsSeparateFromTheCheck();
 
     return testing::Report();
