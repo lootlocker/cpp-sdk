@@ -25,6 +25,8 @@
 
 #include "clock.h"
 
+#include <atomic>
+#include <memory>
 #include <cstdint>
 #include <vector>
 
@@ -38,25 +40,36 @@ public:
     RateLimiter(const RateLimiter&)            = delete;
     RateLimiter& operator=(const RateLimiter&) = delete;
 
-    // Whether a request may be sent now. Does not record anything.
+    // Advances the window by `delta_ms`. Called by the executor's tick, once per `Update()`,
+    // before anything is promoted.
+    //
+    // **Time is pushed in, not read here.** The limiter used to call the clock itself from
+    // inside `CanAcquire()`, which made a `const`-looking predicate mutate the whole module -
+    // and meant the window only advanced when someone happened to ask. A tickable component
+    // should be told how much time passed and do nothing else; the executor owns the clock
+    // and is the one place that reads it.
+    void Tick(std::int64_t delta_ms);
+
+    // Whether a request may be sent now. **Const**: it reads the window and reports, and
+    // does not advance or record anything.
     //
     // Split from `Commit` so the executor can check *before* starting a transfer and record
     // only if the transfer actually started. `IHttpTransport::Start` may return 0, and a
     // start that failed sent nothing - counting it would burn quota for a request that never
     // left, and repeated failures could hold unrelated queued requests.
-    bool CanAcquire();
+    bool CanAcquire() const;
+
     // Records one request against the window. Call only after `CanAcquire()` returned true
     // and the transfer actually started.
     void Commit();
 
-    // Records one request and returns true when it may be sent now.
-    //
-    // Convenience for a caller that has nothing between the check and the send. The executor
-    // does not use it, because it has a `Start` call in between.
-    bool TryAcquire();
-
     // True while the limiter is holding requests back.
-    bool IsLimited() const { return m_limited; }
+    //
+    // Derived rather than stored: a stored flag has to be cleared by something, and the only
+    // method that runs after a successful check is `Commit` - so a caller that only ever
+    // checked would see a stale `true` for ever. Deriving it means `IsLimited()` and
+    // `CanAcquire()` cannot disagree.
+    bool IsLimited() const { return m_limited && m_total > 0; }
 
     // Seconds until the limit is expected to clear. 0 when not limited.
     //
@@ -74,11 +87,12 @@ public:
     void Reset();
 
 private:
-    // Advances the bucket pointer to reflect elapsed time, zeroing the buckets that have
-    // slid out of the window and removing their counts from the running totals.
-    void Advance(std::int64_t now_ms);
+    // Zeroes the buckets that have slid out of the window and removes their counts from the
+    // running totals.
+    void SlideWindow(std::int64_t delta_ms);
 
-    // Whether adding one more request would exceed either threshold.
+    // Whether adding one more request would exceed either threshold. Used by `CanAcquire()`
+    // before anything is recorded, and by `Commit()` after, so the two agree.
     bool WouldTrip() const;
 
     RateLimitConfig m_config;
@@ -90,24 +104,45 @@ private:
     int m_buckets_per_tripwire = 0;
     int m_per_bucket_limit = 0;
 
-    std::vector<int> m_buckets;
+    // **Atomics, because the SDK is single-threaded by contract but not by enforcement.**
+    // `Update()` is documented as the only entry point and callbacks fire on the calling
+    // thread (D5), so in a correct program nothing here is contended. But a game that calls
+    // `Update()` from two threads by mistake would otherwise corrupt the window silently,
+    // and a torn read of `m_total` is a wrong rate limit rather than a crash - the kind of
+    // bug that shows up as "the limiter randomly trips" months later.
+    //
+    // Relaxed ordering throughout: the requirement is that each field is read and written
+    // atomically, not that other threads observe any particular order between them. A
+    // stronger order would buy nothing here and cost on the hot path.
+    //
+    // Explicit locks are deliberately not used. There is no invariant that spans two fields
+    // - a torn read of `m_total` against `m_total_in_tripwire` gives a slightly stale
+    // decision, not a corrupt one - so a mutex would add contention to buy nothing.
+    // A heap array rather than a `std::vector`: `std::atomic` is neither copyable nor
+    // movable, so a vector cannot grow or reallocate. The size is fixed at construction, so
+    // an array is the right shape anyway.
+    std::unique_ptr<std::atomic<int>[]> m_buckets;
 
-    // Index of the most recently written bucket. -1 before the first request.
-    int m_last_bucket = -1;
+    // Index of the most recently written bucket. -1 before the first tick.
+    std::atomic<int> m_last_bucket{-1};
 
-    // When the current bucket became active, snapped to a bucket boundary so sub-bucket
-    // remainder cannot accumulate as drift.
-    std::int64_t m_last_bucket_change_ms = 0;
-    bool         m_started = false;
+    // Milliseconds accumulated since the current bucket became active. Kept as a remainder
+    // rather than an absolute timestamp, because the limiter is told deltas and never reads
+    // the clock: sub-bucket remainder carries forward, so it cannot accumulate as drift.
+    std::atomic<std::int64_t> m_ms_into_bucket{0};
+    std::atomic<bool>         m_started{false};
 
     // Requests across every bucket in the array.
-    int m_total = 0;
+    std::atomic<int> m_total{0};
 
     // Requests in the buckets that fall inside the current tripwire window.
-    int m_total_in_tripwire = 0;
+    std::atomic<int> m_total_in_tripwire{0};
 
-    bool         m_limited = false;
-    std::int64_t m_resolves_at_ms = 0;
+    std::atomic<bool> m_limited{false};
+
+    // Milliseconds until the limit is expected to clear, counted down by `Tick`. A remaining
+    // duration rather than a deadline, for the same reason: no clock reads.
+    std::atomic<std::int64_t> m_ms_until_clear{0};
 };
 
 } // namespace core

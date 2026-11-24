@@ -77,8 +77,15 @@ Client::Client(const Config& config) : m_impl(new Impl())
 #endif
     }
 
-    m_impl->executor.reset(new core::Executor(config.queue, config.rate_limit, transport,
-                                              m_impl->clock, logger, m_impl->config_error));
+    core::ExecutorSettings settings;
+    settings.queue = config.queue;
+    settings.rate_limit = config.rate_limit;
+    settings.transport = transport;
+    settings.clock = &m_impl->clock;
+    settings.logger = logger;
+    settings.config_error = m_impl->config_error;
+
+    m_impl->executor.reset(new core::Executor(settings));
 }
 
 Client::~Client() = default;

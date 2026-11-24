@@ -61,21 +61,36 @@ struct Completion {
 
 using CompletionHandler = std::function<void(const Completion&)>;
 
+// Everything the executor needs to be constructed.
+//
+// A struct rather than a parameter list, because the executor has five dependencies and
+// three of them are optional. Three overloads existed to avoid naming the optional ones;
+// with no users yet there is nothing to keep compatible, and one shape is easier to read
+// and to extend than three that differ by a trailing argument.
+struct ExecutorSettings {
+    QueueConfig queue;
+
+    // The rate limiter's policy (D25). Defaults are the production values, so a caller that
+    // does not care gets the real limiter rather than a disabled one.
+    RateLimitConfig rate_limit;
+
+    // The transport. Empty means "none available", which the executor reports rather than
+    // crashing on - a build without curl and no injected transport is a supported state.
+    std::weak_ptr<IHttpTransport> transport;
+
+    // The clock. Never null: the executor dereferences it, and a test supplies a fake.
+    Clock* clock = nullptr;
+
+    std::weak_ptr<Logger> logger;
+
+    // Empty when the config was usable. A non-empty error makes every submission reject with
+    // it, which is how an inert client still delivers its handlers.
+    Error config_error;
+};
+
 class Executor {
 public:
-    Executor(const QueueConfig& config, std::weak_ptr<IHttpTransport> transport, Clock& clock,
-             std::weak_ptr<Logger> logger);
-
-    // The same, plus the config error the client found. A non-empty error makes every
-    // submission reject with it, which is how an inert client still delivers its handlers.
-    Executor(const QueueConfig& config, std::weak_ptr<IHttpTransport> transport, Clock& clock,
-             std::weak_ptr<Logger> logger, Error config_error);
-
-    // The same, plus the rate limiter's policy (D25). The limiter is constructed from it and
-    // shares the executor's clock, so a test drives both with one fake.
-    Executor(const QueueConfig& config, const RateLimitConfig& rate_limit,
-             std::weak_ptr<IHttpTransport> transport, Clock& clock,
-             std::weak_ptr<Logger> logger, Error config_error);
+    explicit Executor(const ExecutorSettings& settings);
     ~Executor();
 
     Executor(const Executor&)            = delete;
@@ -178,8 +193,10 @@ private:
     Clock&                         m_clock;
     std::weak_ptr<Logger>          m_logger;
 
-    // The client-side throttle (D25). Held by value: it is small, it shares the executor's
-    // clock, and it has no reason to outlive the executor.
+    std::int64_t m_last_tick_ms = 0;
+
+    // The client-side throttle (D25). Held by value: it is small, it is ticked by `Update()`,
+    // and it has no reason to outlive the executor.
     RateLimiter m_rate_limiter;
 
     std::map<RequestId, Entry>     m_entries;

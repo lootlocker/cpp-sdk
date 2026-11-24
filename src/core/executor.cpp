@@ -40,25 +40,10 @@ bool IsRetryableStatus(int status_code)
 
 } // namespace
 
-Executor::Executor(const QueueConfig& config, std::weak_ptr<IHttpTransport> transport,
-                   Clock& clock, std::weak_ptr<Logger> logger)
-    : m_config(config), m_transport(std::move(transport)), m_clock(clock),
-      m_logger(std::move(logger)), m_rate_limiter(RateLimitConfig(), clock)
-{
-}
-
-Executor::Executor(const QueueConfig& config, std::weak_ptr<IHttpTransport> transport,
-                   Clock& clock, std::weak_ptr<Logger> logger, Error config_error)
-    : m_config(config), m_config_error(std::move(config_error)), m_transport(std::move(transport)),
-      m_clock(clock), m_logger(std::move(logger)), m_rate_limiter(RateLimitConfig(), clock)
-{
-}
-
-Executor::Executor(const QueueConfig& config, const RateLimitConfig& rate_limit,
-                   std::weak_ptr<IHttpTransport> transport, Clock& clock,
-                   std::weak_ptr<Logger> logger, Error config_error)
-    : m_config(config), m_config_error(std::move(config_error)), m_transport(std::move(transport)),
-      m_clock(clock), m_logger(std::move(logger)), m_rate_limiter(rate_limit, clock)
+Executor::Executor(const ExecutorSettings& settings)
+    : m_config(settings.queue), m_config_error(settings.config_error),
+      m_transport(settings.transport), m_clock(*settings.clock), m_logger(settings.logger),
+      m_rate_limiter(settings.rate_limit, *settings.clock)
 {
 }
 
@@ -359,6 +344,13 @@ bool Executor::Update()
     DrainRejected();
 
     const std::int64_t now = m_clock.NowMs();
+
+    // The executor is the one place that reads the clock, and it pushes the delta into every
+    // tickable component. A component that read the clock itself would advance only when
+    // someone happened to ask it something, which is how the limiter used to work.
+    const std::int64_t delta_ms = (m_last_tick_ms == 0) ? 0 : now - m_last_tick_ms;
+    m_last_tick_ms = now;
+    m_rate_limiter.Tick(delta_ms);
 
     std::vector<CompletionHandler> handlers;
     std::vector<Completion>        completions;

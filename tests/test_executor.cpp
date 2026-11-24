@@ -87,7 +87,12 @@ struct Fixture {
     explicit Fixture(QueueConfig config = DefaultQueue())
         : transport(std::make_shared<FakeHttpTransport>()), logger(std::make_shared<RecordingLogger>())
     {
-        executor.reset(new Executor(config, transport, clock, logger));
+        ExecutorSettings settings;
+        settings.queue = config;
+        settings.transport = transport;
+        settings.clock = &clock;
+        settings.logger = logger;
+        executor.reset(new Executor(settings));
     }
 
     std::shared_ptr<FakeHttpTransport> transport;
@@ -652,7 +657,13 @@ void TestInvalidConfigRejectsThroughUpdate()
     auto transport = std::make_shared<FakeHttpTransport>();
     auto logger = std::make_shared<RecordingLogger>();
     FakeClock clock;
-    Executor executor(DefaultQueue(), transport, clock, logger, config_error);
+    ExecutorSettings settings;
+    settings.queue = DefaultQueue();
+    settings.transport = transport;
+    settings.clock = &clock;
+    settings.logger = logger;
+    settings.config_error = config_error;
+    Executor executor(settings);
 
     int delivered = 0;
     Completion last;
@@ -1025,7 +1036,13 @@ struct LimitedFixture {
         limit.moving_average_fraction = 1.0;
         limit.moving_average_time_frames = 1;
 
-        executor.reset(new Executor(queue, limit, transport, clock, logger, Error()));
+        ExecutorSettings settings;
+        settings.queue = queue;
+        settings.rate_limit = limit;
+        settings.transport = transport;
+        settings.clock = &clock;
+        settings.logger = logger;
+        executor.reset(new Executor(settings));
     }
 
     std::shared_ptr<FakeHttpTransport> transport;
@@ -1088,7 +1105,13 @@ void TestServerRateLimitIsHandledByRetryNotTheLimiter()
     auto transport = std::make_shared<FakeHttpTransport>();
     auto logger = std::make_shared<RecordingLogger>();
     FakeClock clock;
-    Executor executor(queue, limit, transport, clock, logger, Error());
+    ExecutorSettings settings;
+    settings.queue = queue;
+    settings.rate_limit = limit;
+    settings.transport = transport;
+    settings.clock = &clock;
+    settings.logger = logger;
+    Executor executor(settings);
 
     int delivered = 0;
     Completion last;
@@ -1153,7 +1176,13 @@ void TestFailedStartDoesNotBurnQuota()
     auto transport = std::make_shared<RefusingTransport>();
     auto logger = std::make_shared<RecordingLogger>();
     FakeClock clock;
-    Executor executor(queue, limit, transport, clock, logger, Error());
+    ExecutorSettings settings;
+    settings.queue = queue;
+    settings.rate_limit = limit;
+    settings.transport = transport;
+    settings.clock = &clock;
+    settings.logger = logger;
+    Executor executor(settings);
 
     int delivered = 0;
     for (int i = 0; i < 10; ++i) {

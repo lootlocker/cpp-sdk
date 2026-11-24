@@ -27,6 +27,29 @@ private:
     std::int64_t m_now = 1000000;   // non-zero, so "not set" is distinguishable
 };
 
+// The limiter is told deltas and never reads the clock, so a test drives it by ticking.
+//
+// `Acquire` is the old `TryAcquire` shape - tick, check, commit - which is what the executor
+// does across an `Update()`. Keeping it here rather than in the limiter is deliberate: the
+// limiter has no business deciding when time passes.
+bool Acquire(RateLimiter& limiter, FakeClock& clock, std::int64_t delta_ms = 0)
+{
+    clock.Advance(delta_ms);
+    limiter.Tick(delta_ms);
+    if (!limiter.CanAcquire()) {
+        return false;
+    }
+    limiter.Commit();
+    return true;
+}
+
+void Advance(RateLimiter& limiter, FakeClock& clock, int seconds)
+{
+    const std::int64_t delta_ms = static_cast<std::int64_t>(seconds) * 1000;
+    clock.Advance(delta_ms);
+    limiter.Tick(delta_ms);
+}
+
 RateLimitConfig Defaults()
 {
     RateLimitConfig config;
@@ -59,15 +82,18 @@ void TestBurstTripsTheTripwire()
     // 280 requests in one bucket is allowed: the cap is "more than 280".
     int allowed = 0;
     for (int i = 0; i < 280; ++i) {
-        if (limiter.TryAcquire()) {
+        if (Acquire(limiter, clock)) {
             ++allowed;
         }
     }
     CHECK_EQ_INT(allowed, 280);
-    CHECK(!limiter.IsLimited());
 
-    // The 281st trips it.
-    CHECK(!limiter.TryAcquire());
+    // `IsLimited()` reports whether the *next* request would be refused, so it is already
+    // true here - the 281st is the one that trips.
+    CHECK(limiter.IsLimited());
+
+    // The 281st is refused.
+    CHECK(!Acquire(limiter, clock));
     CHECK(limiter.IsLimited());
     CHECK_EQ_INT(limiter.TripwireCount(), 280);
 }
@@ -78,9 +104,9 @@ void TestTripwireClearsWhenTheWindowSlides()
     RateLimiter limiter(Defaults(), clock);
 
     for (int i = 0; i < 280; ++i) {
-        CHECK(limiter.TryAcquire());
+        CHECK(Acquire(limiter, clock));
     }
-    CHECK(!limiter.TryAcquire());
+    CHECK(!Acquire(limiter, clock));
     CHECK(limiter.IsLimited());
 
     // The tripwire window is 60 s, but the limiter does not clear when the tripwire window
@@ -89,17 +115,17 @@ void TestTripwireClearsWhenTheWindowSlides()
     // the Unreal and Unity SDKs, and it is deliberately conservative: a burst that tripped
     // the hard cap backs the client off for the full window rather than resuming the
     // instant the 60 s count drops.
-    clock.AdvanceSeconds(59);
-    CHECK(!limiter.TryAcquire());
+    Advance(limiter, clock, 59);
+    CHECK(!Acquire(limiter, clock));
     CHECK(limiter.IsLimited());
 
-    clock.AdvanceSeconds(60);
-    CHECK(!limiter.TryAcquire());
+    Advance(limiter, clock, 60);
+    CHECK(!Acquire(limiter, clock));
     CHECK(limiter.IsLimited());
 
     // Past the full window, the counted requests have aged out and the limiter clears.
-    clock.AdvanceSeconds(62);
-    CHECK(limiter.TryAcquire());
+    Advance(limiter, clock, 62);
+    CHECK(limiter.CanAcquire());
     CHECK(!limiter.IsLimited());
 }
 
@@ -117,9 +143,9 @@ void TestSustainedTrafficTripsTheMovingAverage()
     // soft cap.
     for (int bucket = 0; bucket < 36; ++bucket) {
         for (int i = 0; i < 18; ++i) {
-            CHECK(limiter.TryAcquire());
+            CHECK(Acquire(limiter, clock));
         }
-        clock.AdvanceSeconds(5);
+        Advance(limiter, clock, 5);
     }
     CHECK(!limiter.IsLimited());
 
@@ -127,13 +153,13 @@ void TestSustainedTrafficTripsTheMovingAverage()
     // the tripwire (280 per 60 s) is nowhere near.
     for (int bucket = 0; bucket < 36; ++bucket) {
         for (int i = 0; i < 19; ++i) {
-            if (!limiter.TryAcquire()) {
+            if (!Acquire(limiter, clock)) {
                 // Tripped partway through, which is the expected outcome.
                 CHECK(limiter.IsLimited());
                 return;
             }
         }
-        clock.AdvanceSeconds(5);
+        Advance(limiter, clock, 5);
     }
 
     // Reaching here means it never tripped, which is the failure.
@@ -150,12 +176,12 @@ void TestMovingAverageTripsBelowTheTripwire()
     bool tripped = false;
     for (int bucket = 0; bucket < 36 && !tripped; ++bucket) {
         for (int i = 0; i < 19; ++i) {
-            if (!limiter.TryAcquire()) {
+            if (!Acquire(limiter, clock)) {
                 tripped = true;
                 break;
             }
         }
-        clock.AdvanceSeconds(5);
+        Advance(limiter, clock, 5);
     }
 
     CHECK(tripped);
@@ -173,22 +199,22 @@ void TestHeldRequestsAreNotCounted()
     RateLimiter limiter(Defaults(), clock);
 
     for (int i = 0; i < 280; ++i) {
-        CHECK(limiter.TryAcquire());
+        CHECK(Acquire(limiter, clock));
     }
-    CHECK(!limiter.TryAcquire());
+    CHECK(!Acquire(limiter, clock));
     CHECK_EQ_INT(limiter.TripwireCount(), 280);
 
     // A held request must not count against the window, or the limiter would keep itself
     // tripped by its own backlog and the window would never drain.
     for (int i = 0; i < 100; ++i) {
-        CHECK(!limiter.TryAcquire());
+        CHECK(!Acquire(limiter, clock));
     }
     CHECK_EQ_INT(limiter.TripwireCount(), 280);
 
     // So it still clears on schedule - the full moving-average window, not the tripwire
     // window.
-    clock.AdvanceSeconds(181);
-    CHECK(limiter.TryAcquire());
+    Advance(limiter, clock, 181);
+    CHECK(Acquire(limiter, clock));
 }
 
 void TestSecondsUntilClearIsAnEstimateThatExpires()
@@ -199,18 +225,19 @@ void TestSecondsUntilClearIsAnEstimateThatExpires()
     CHECK_EQ_INT(limiter.SecondsUntilClear(), 0);
 
     for (int i = 0; i < 280; ++i) {
-        CHECK(limiter.TryAcquire());
+        CHECK(Acquire(limiter, clock));
     }
-    CHECK(!limiter.TryAcquire());
+    CHECK(!Acquire(limiter, clock));
 
-    // The window is 3 minutes (36 buckets of 5 s), so the estimate is bounded by that.
+    // The window is 3 minutes (36 buckets of 5 s), plus whatever is left of the current
+    // bucket - so the estimate is bounded by 180 s plus one bucket.
     const int estimate = limiter.SecondsUntilClear();
     CHECK(estimate > 0);
-    CHECK(estimate <= 180);
+    CHECK(estimate <= 185);
 
     // Waiting the estimate out clears it.
-    clock.AdvanceSeconds(estimate);
-    CHECK(limiter.TryAcquire());
+    Advance(limiter, clock, estimate);
+    CHECK(Acquire(limiter, clock));
     CHECK_EQ_INT(limiter.SecondsUntilClear(), 0);
 }
 
@@ -226,7 +253,7 @@ void TestDisabledLimiterAlwaysAllows()
 
     // Far past every threshold, and still allowed.
     for (int i = 0; i < 10000; ++i) {
-        CHECK(limiter.TryAcquire());
+        CHECK(Acquire(limiter, clock));
     }
     CHECK(!limiter.IsLimited());
 }
@@ -237,9 +264,9 @@ void TestResetClearsEverything()
     RateLimiter limiter(Defaults(), clock);
 
     for (int i = 0; i < 280; ++i) {
-        CHECK(limiter.TryAcquire());
+        CHECK(Acquire(limiter, clock));
     }
-    CHECK(!limiter.TryAcquire());
+    CHECK(!Acquire(limiter, clock));
     CHECK(limiter.IsLimited());
 
     limiter.Reset();
@@ -247,7 +274,7 @@ void TestResetClearsEverything()
     CHECK(!limiter.IsLimited());
     CHECK_EQ_INT(limiter.TripwireCount(), 0);
     CHECK_EQ_INT(limiter.WindowCount(), 0);
-    CHECK(limiter.TryAcquire());
+    CHECK(Acquire(limiter, clock));
 }
 
 void TestLongIdlePeriodClearsWithoutIterating()
@@ -256,16 +283,16 @@ void TestLongIdlePeriodClearsWithoutIterating()
     RateLimiter limiter(Defaults(), clock);
 
     for (int i = 0; i < 280; ++i) {
-        CHECK(limiter.TryAcquire());
+        CHECK(Acquire(limiter, clock));
     }
-    CHECK(!limiter.TryAcquire());
+    CHECK(!Acquire(limiter, clock));
 
     // A day of idleness is far more buckets than exist. The limiter must clear rather than
     // loop over a window that is entirely stale.
-    clock.AdvanceSeconds(86400);
-    CHECK(limiter.TryAcquire());
+    Advance(limiter, clock, 86400);
+    CHECK(limiter.CanAcquire());
     CHECK(!limiter.IsLimited());
-    CHECK_EQ_INT(limiter.TripwireCount(), 1);
+    CHECK_EQ_INT(limiter.TripwireCount(), 0);
 }
 
 void TestCustomConstantsAreHonoured()
@@ -284,15 +311,15 @@ void TestCustomConstantsAreHonoured()
 
     int allowed = 0;
     for (int i = 0; i < 10; ++i) {
-        if (limiter.TryAcquire()) {
+        if (Acquire(limiter, clock)) {
             ++allowed;
         }
     }
     CHECK_EQ_INT(allowed, 10);
-    CHECK(!limiter.TryAcquire());
+    CHECK(!Acquire(limiter, clock));
 
-    clock.AdvanceSeconds(11);
-    CHECK(limiter.TryAcquire());
+    Advance(limiter, clock, 11);
+    CHECK(Acquire(limiter, clock));
 }
 
 void TestNonDivisiblePolicyIsRejected()
@@ -309,7 +336,7 @@ void TestNonDivisiblePolicyIsRejected()
     // Rejected means the limiter is inert rather than silently misconfigured. It allows
     // everything, which is the safe direction: a broken policy must not throttle a game.
     for (int i = 0; i < 1000; ++i) {
-        CHECK(limiter.TryAcquire());
+        CHECK(Acquire(limiter, clock));
     }
     CHECK(!limiter.IsLimited());
 }
@@ -329,7 +356,7 @@ void TestOverflowingBucketCountIsRejected()
 
     // Inert rather than negative, and no huge allocation.
     for (int i = 0; i < 1000; ++i) {
-        CHECK(limiter.TryAcquire());
+        CHECK(Acquire(limiter, clock));
     }
     CHECK(!limiter.IsLimited());
 }
@@ -339,6 +366,10 @@ void TestCommitIsSeparateFromTheCheck()
     // that returned 0 sent nothing. This is the primitive that makes that possible.
     FakeClock clock;
     RateLimiter limiter(Defaults(), clock);
+
+    // The first tick initialises bucket 0. Without it `Commit` has nowhere to write, which is
+    // why the executor ticks before promoting anything.
+    limiter.Tick(0);
 
     CHECK(limiter.CanAcquire());
     CHECK_EQ_INT(limiter.TripwireCount(), 0);   // checking alone records nothing
