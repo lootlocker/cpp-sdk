@@ -15,6 +15,7 @@
 namespace lootlocker {
 
 class Client;
+class StateWriter;
 
 namespace core {
 class Executor;
@@ -78,6 +79,20 @@ public:
     // tied to a session. Not a security token: it identifies a client instance, nothing
     // more.
     const std::string& GetInstanceIdentifier() const;
+
+    // Replaces the state writer. The client observes it through a `weak_ptr`, so the
+    // adopter keeps ownership.
+    //
+    // Unlike `SetTransport`, this is allowed at any time: a state writer has no in-flight
+    // state to strand, and swapping one mid-session is a legitimate thing for a game to do
+    // when the player signs in to a platform account.
+    //
+    // An empty or dead `weak_ptr` falls back to the default `FileStateWriter`.
+    void SetStateWriter(std::weak_ptr<StateWriter> writer);
+
+    // The state writer in use. Never empty: the client always has one, defaulting to
+    // `FileStateWriter`.
+    std::weak_ptr<StateWriter> GetStateWriter() const;
 
 private:
     // The correct form: the function is declared in `core` above, so the friend

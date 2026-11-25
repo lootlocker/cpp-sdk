@@ -3,6 +3,7 @@
 #include <lootlocker/curl_http_transport.h>
 #include <lootlocker/http_transport.h>
 #include <lootlocker/log.h>
+#include <lootlocker/state_writer.h>
 
 #include "clock.h"
 #include "executor.h"
@@ -29,6 +30,12 @@ struct Client::Impl {
     // The default transport, owned here for the same reason. Empty when curl was not built
     // in, which is a supported configuration: the adopter injects their own.
     std::shared_ptr<IHttpTransport> owned_transport;
+
+    // The state writer. The default is always constructed, so the client can fall back to it
+    // when an injected writer dies - the seam is "adopter owns, SDK observes", so the
+    // injected one is held weakly and may expire at any time.
+    std::shared_ptr<StateWriter> default_state_writer;
+    std::weak_ptr<StateWriter>   state_writer;
 
     core::SteadyClock clock;
     std::unique_ptr<core::Executor> executor;
@@ -110,9 +117,18 @@ Client::Client(const Config& config) : m_impl(new Impl())
 #endif
     }
 
+    // The state writer: the injected one wins, otherwise the file default. The default is
+    // always constructed, because an injected writer is held weakly and may expire later -
+    // the client then falls back to this rather than having nothing to persist to.
+    m_impl->default_state_writer = std::make_shared<FileStateWriter>();
+    if (std::shared_ptr<StateWriter> injected = config.state_writer.lock()) {
+        m_impl->state_writer = injected;
+    } else {
+        m_impl->state_writer = m_impl->default_state_writer;
+    }
+
     core::ExecutorSettings settings;
     settings.queue = config.queue;
-
     // An invalid config means the policy was never validated, so it must not reach the
     // limiter: a rejected 2-billion-second window would still derive 2 billion buckets and
     // attempt a multi-gigabyte allocation during construction, which in a no-exceptions
@@ -165,6 +181,29 @@ std::weak_ptr<IHttpTransport> Client::GetTransport() const
 const std::string& Client::GetInstanceIdentifier() const
 {
     return m_impl->instance_identifier;
+}
+
+void Client::SetStateWriter(std::weak_ptr<StateWriter> writer)
+{
+    if (std::shared_ptr<StateWriter> resolved = writer.lock()) {
+        m_impl->state_writer = resolved;
+        return;
+    }
+    // An empty or dead writer falls back to the default rather than leaving the client with
+    // nothing. A game that wants no persistence injects a `NullStateWriter` explicitly,
+    // which is a different statement from "I forgot".
+    m_impl->state_writer = m_impl->default_state_writer;
+}
+
+std::weak_ptr<StateWriter> Client::GetStateWriter() const
+{
+    // Resolved at read time, not at set time: the injected writer is held weakly, so it may
+    // have died since. Returning the expired handle would leave the caller with nothing to
+    // persist to, which is the opposite of what a default is for.
+    if (std::shared_ptr<StateWriter> live = m_impl->state_writer.lock()) {
+        return live;
+    }
+    return m_impl->default_state_writer;
 }
 
 namespace core {
