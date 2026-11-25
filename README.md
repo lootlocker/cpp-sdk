@@ -267,6 +267,55 @@ model exists to prevent. A decoder that has nothing to reject returns `Ok(Empty(
 distinct from `Kind::Null` — so "the field is missing" and "the field is null" are different
 answers, and you can tell them apart.
 
+### Writing a request body
+
+A request type with an ADL `to_json` sends its serialised form as the body, with
+`Content-Type: application/json` set for you. A type without one sends no body, which is
+what every GET does.
+
+```cpp
+namespace my_game {
+
+struct SessionOptionals {
+    std::string timezone;
+    std::string player_name;
+    bool        auto_create_profile = true;
+};
+
+void to_json(lootlocker::JsonBuilder& b, const SessionOptionals& in)
+{
+    b.Set("timezone", in.timezone);
+    b.Set("player_name", in.player_name);
+    b.Set("auto_create_profile", in.auto_create_profile);
+}
+
+struct GuestSessionRequest {
+    std::string      game_key;
+    std::string      game_version;
+    std::string      player_identifier;
+    SessionOptionals optionals;
+};
+
+void to_json(lootlocker::JsonBuilder& b, const GuestSessionRequest& in)
+{
+    b.Set("game_key", in.game_key);
+    b.Set("game_version", in.game_version);
+    b.Set("player_identifier", in.player_identifier);
+    b.Set("optionals", in.optionals);   // nested, through its own to_json
+}
+
+} // namespace my_game
+```
+
+`JsonBuilder` gives you `Set()` for strings, integers, unsigned integers, doubles and bools,
+`SetNull()` for an explicit JSON null, and a `Set()` overload that takes any type with its
+own `to_json`. Keys serialise in sorted order, because a JSON object is unordered by
+definition.
+
+`JsonBuilder` is a separate type from `JsonValue` on purpose: `JsonValue` is a read handle
+over a shared, immutable document, which is what makes it cheap to pass around and safe to
+hold across a callback. Writing needs its own type.
+
 ### There is no parser seam
 
 Unlike the transport or the state writer, the JSON parser is not injectable. It is internal

@@ -5,6 +5,8 @@
 
 #include "json.h"
 
+#include <lootlocker/json_builder.h>
+
 // `JSON_NOEXCEPTION` makes the library's throwing paths abort rather than throw, and
 // `parse(..., allow_exceptions = false)` returns a discarded value instead. Both are
 // required: the build has exceptions disabled (`/EHs-c-`), so a `try`/`catch` here would
@@ -318,4 +320,87 @@ std::string SerializeJson(const JsonValue& value)
 }
 
 } // namespace core
+} // namespace lootlocker
+
+// ---------------------------------------------------------------------------
+// JsonBuilder (T13d)
+// ---------------------------------------------------------------------------
+//
+// In this translation unit for the same reason as everything above: it is the only one that
+// includes the JSON library (D4, D18).
+
+namespace lootlocker {
+
+struct JsonBuilder::Impl {
+    nlohmann::json document = nlohmann::json::object();
+};
+
+JsonBuilder::JsonBuilder() : m_impl(new Impl()) {}
+JsonBuilder::~JsonBuilder() = default;
+JsonBuilder::JsonBuilder(JsonBuilder&&) noexcept = default;
+JsonBuilder& JsonBuilder::operator=(JsonBuilder&&) noexcept = default;
+
+void JsonBuilder::Set(const std::string& key, const std::string& value)
+{
+    m_impl->document[key] = value;
+}
+
+void JsonBuilder::Set(const std::string& key, const char* value)
+{
+    // A null `const char*` becomes JSON null rather than an empty string: they are different
+    // answers, and silently turning one into the other is how a caller loses a distinction
+    // they cared about.
+    if (value == nullptr) {
+        SetNull(key);
+        return;
+    }
+    m_impl->document[key] = std::string(value);
+}
+
+void JsonBuilder::Set(const std::string& key, int value)
+{
+    m_impl->document[key] = value;
+}
+
+void JsonBuilder::Set(const std::string& key, std::int64_t value)
+{
+    m_impl->document[key] = value;
+}
+
+void JsonBuilder::Set(const std::string& key, std::uint64_t value)
+{
+    // Assigned as unsigned, so nlohmann stores `number_unsigned` and a value above 2^63
+    // round-trips. Assigning through `int64_t` would wrap it negative.
+    m_impl->document[key] = value;
+}
+
+void JsonBuilder::Set(const std::string& key, double value)
+{
+    m_impl->document[key] = value;
+}
+
+void JsonBuilder::Set(const std::string& key, bool value)
+{
+    m_impl->document[key] = value;
+}
+
+void JsonBuilder::SetNull(const std::string& key)
+{
+    m_impl->document[key] = nullptr;
+}
+
+void JsonBuilder::SetValue(const std::string& key, JsonBuilder&& child)
+{
+    m_impl->document[key] = std::move(child.m_impl->document);
+}
+
+std::string JsonBuilder::ToJson() const
+{
+    // `dump` with `error_handler_t::replace` rather than the default. The default throws on
+    // invalid UTF-8, and with `JSON_NOEXCEPTION` a throw is an abort - so a player name with
+    // a stray byte would terminate the process. Replacing the bad sequence sends a body the
+    // server can reject with a clear message instead.
+    return m_impl->document.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+}
+
 } // namespace lootlocker
