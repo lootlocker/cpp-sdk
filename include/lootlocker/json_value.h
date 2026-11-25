@@ -61,6 +61,17 @@ public:
     std::uint64_t AsUInt64() const;
     std::string   AsString() const;
 
+    // Whether a `Number` is an integer rather than a float, and whether it is unsigned.
+    //
+    // Exposed because a custom serialiser needs the same distinction the SDK's own decoders
+    // make: a `uint64` field must not be read through `AsDouble()`, which loses precision
+    // above 2^53. Without these, an adopter writing a `from_json` for such a field has to
+    // guess from the value, and guessing is how the 2^53 hazard comes back.
+    //
+    // Both are false for anything that is not a `Number`.
+    bool IsInteger() const;
+    bool IsUnsigned() const;
+
     // Object access. Returns an invalid value when the key is absent or this is not an
     // object.
     JsonValue operator[](const std::string& key) const;

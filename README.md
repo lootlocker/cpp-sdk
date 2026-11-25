@@ -198,6 +198,72 @@ already cached can block for the length of the lookup. The transfer itself is po
 name resolution is not. If that matters, resolve once at startup or inject a transport whose
 resolver is asynchronous.
 
+## JSON
+
+The SDK parses JSON with [nlohmann/json](https://github.com/nlohmann/json), vendored as a
+submodule pinned to `v3.11.3` and included by exactly one translation unit. **You never see
+it.** No public header includes it, and no public type names it.
+
+That is deliberate: it keeps our parser choice out of the API, so changing it later is not a
+breaking change for you.
+
+### Reading a field the SDK does not model
+
+Use `RawBody()`. Every result carries the response body exactly as the server sent it, on
+success and on failure, so you can parse it with whatever you already have:
+
+```cpp
+lootlocker::broadcasts::List(ll, [](lootlocker::Result<std::vector<lootlocker::Broadcast>> r) {
+    if (!r.Ok()) {
+        // The body is here too, so you can see what the server actually said.
+        my_log(r.RawBody());
+        return;
+    }
+    my_own_parser(r.RawBody());   // your parser, your types
+});
+```
+
+This is the intended answer to "the SDK is missing a field". It is not a workaround.
+
+### Custom decoding for a type
+
+If you need a field decoded differently from the default, write an ADL `from_json` next to
+your type. It takes a `lootlocker::JsonValue`, which is a parser-independent handle — it
+exposes the shape of the value and nothing about which library produced it:
+
+```cpp
+namespace my_game {
+
+struct PlayerStats {
+    std::uint64_t total_score = 0;
+    std::string   rank;
+};
+
+void from_json(const lootlocker::JsonValue& j, PlayerStats& out)
+{
+    // `IsUnsigned()` matters: reading a uint64 through AsDouble() loses precision above
+    // 2^53, which is the one hazard the JSON spike found.
+    if (j["total_score"].IsUnsigned()) {
+        out.total_score = j["total_score"].AsUInt64();
+    }
+    out.rank = j["rank"].AsString();
+}
+
+} // namespace my_game
+```
+
+`JsonValue` gives you `GetKind()`, `IsInteger()`, `IsUnsigned()`, the typed `As*` reads,
+`operator[]`, `HasKey()`, `Size()` and `At()`. An absent key is `Kind::Invalid`, which is
+distinct from `Kind::Null` — so "the field is missing" and "the field is null" are different
+answers, and you can tell them apart.
+
+### There is no parser seam
+
+Unlike the transport or the state writer, the JSON parser is not injectable. It is internal
+machinery rather than an ecosystem-docking point: every adopter needs it, none needs a
+different one, and a seam with no consumer is a seam nobody maintains. If you need a
+different parser, `RawBody()` gives you the bytes.
+
 ## What is in v1
 
 Guest, white label and Steam authentication, plus broadcasts. Presence, offline mode,
