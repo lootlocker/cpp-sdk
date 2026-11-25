@@ -7,6 +7,7 @@
 
 #include "clock.h"
 #include "executor.h"
+#include "optional.h"
 
 #include <cstdio>
 #include <random>
@@ -37,6 +38,10 @@ struct Client::Impl {
     // any time, so the default is also the fallback.
     mutable std::shared_ptr<IStateWriter> default_state_writer;
     std::weak_ptr<IStateWriter>           state_writer;
+
+    // The session, if one has been started. `Optional` because a client that has not
+    // authenticated has no session, and a default-constructed `Session` would be a lie.
+    core::Optional<Session> session;
 
     // The writer to use, constructing the default on first call.
     std::shared_ptr<IStateWriter> ResolveStateWriter() const
@@ -152,6 +157,17 @@ Client::Client(const Config& config) : m_impl(new Impl())
     settings.logger = logger;
     settings.config_error = m_impl->config_error;
 
+    // The session token is read at send time, so a request queued before a session starts
+    // still carries the token once it is sent. Captured by pointer to the impl, which
+    // outlives the executor because the executor is a member of it.
+    Impl* impl = m_impl.get();
+    settings.session_token = [impl]() -> std::string {
+        if (!impl->session.has_value()) {
+            return std::string();
+        }
+        return impl->session->session_token;
+    };
+
     m_impl->executor.reset(new core::Executor(settings));
 }
 
@@ -205,6 +221,29 @@ std::weak_ptr<IStateWriter> Client::GetStateWriter() const
     // have died since. Returning the expired handle would leave the caller with nothing to
     // persist to, which is the opposite of what a default is for.
     return m_impl->ResolveStateWriter();
+}
+
+bool Client::HasSession() const
+{
+    return m_impl->session.has_value();
+}
+
+const Session& Client::GetSession() const
+{
+    // A precondition violation rather than an exception (D7). The alternative - returning a
+    // default-constructed `Session` - would hand the caller an empty token and let the
+    // failure surface as a confusing 401 instead of here.
+    return *m_impl->session;
+}
+
+void Client::SetSession(const Session& session)
+{
+    m_impl->session = session;
+}
+
+void Client::ClearSession()
+{
+    m_impl->session.reset();
 }
 
 namespace core {

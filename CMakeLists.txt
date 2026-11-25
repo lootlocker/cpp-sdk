@@ -143,6 +143,7 @@ add_library(lootlocker_core STATIC
     src/core/rate_limiter.cpp
     src/core/json.cpp
     src/core/query_parameters.cpp
+    src/core/session.cpp
     src/core/state_writer.cpp
     src/core/executor.cpp
     src/core/client.cpp
@@ -190,6 +191,11 @@ foreach(module IN LISTS LOOTLOCKER_FEATURE_MODULES)
     target_link_libraries(lootlocker_${module}
         PUBLIC LootLocker::core
         PRIVATE lootlocker_compile_options)
+
+    # A module may include `core`'s internal headers, because it is built inside the library
+    # (D18). An adopter cannot: `src/` is not on their include path, so the definitions are
+    # unreachable even though the declarations are visible.
+    target_include_directories(lootlocker_${module} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 endforeach()
 
 # ---------------------------------------------------------------------------
