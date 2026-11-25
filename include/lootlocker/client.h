@@ -8,6 +8,7 @@
 
 #include <lootlocker/config.h>
 #include <lootlocker/result.h>
+#include <lootlocker/session.h>
 
 #include <memory>
 #include <string>
@@ -95,6 +96,28 @@ public:
     // The state writer in use. Never empty: the client always has one, defaulting to
     // `FileStateWriter`.
     std::weak_ptr<IStateWriter> GetStateWriter() const;
+
+    // The session, if one has been started.
+    //
+    // Returns a reference to the client's own copy rather than a value, so a per-frame read
+    // costs nothing. `HasSession()` is the cheap check; `Session()` is only valid when it is
+    // true.
+    bool HasSession() const;
+
+    // Precondition: `HasSession()`. Dereferencing without checking is a precondition
+    // violation, the same contract as `Result::Value()`.
+    const Session& GetSession() const;
+
+    // Sets the session directly, without a network call.
+    //
+    // For a game that restores a session from its own storage, and for a test. The SDK does
+    // not call this itself: `auth::StartGuestSession` sets the session when the response
+    // arrives.
+    void SetSession(const Session& session);
+
+    // Clears the session. Does not call the API - `auth::EndSession` is the call that ends
+    // a session server-side.
+    void ClearSession();
 
 private:
     // The correct form: the function is declared in `core` above, so the friend

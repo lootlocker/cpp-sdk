@@ -80,6 +80,14 @@ add_executable(test_state_writer test_state_writer.cpp)
 target_link_libraries(test_state_writer PRIVATE LootLocker::core lootlocker_compile_options)
 add_test(NAME state_writer COMMAND test_state_writer)
 
+# Guest auth (T14). Links the auth module, so it exercises the real module target rather
+# than reaching into `core` directly.
+if(TARGET LootLocker::auth)
+    add_executable(test_auth test_auth.cpp)
+    target_link_libraries(test_auth PRIVATE LootLocker::auth lootlocker_compile_options)
+    add_test(NAME auth COMMAND test_auth)
+endif()
+
 # The end-to-end transport test (T11, owner 2026-11-13): a real round trip through the real
 # curl transport against a loopback server, plus the proof that `Config::transport` is
 # actually consulted.

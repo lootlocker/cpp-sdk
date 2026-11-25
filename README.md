@@ -328,7 +328,50 @@ definition.
 over a shared, immutable document, which is what makes it cheap to pass around and safe to
 hold across a callback. Writing needs its own type.
 
-### Persistence
+### Authentication
+
+Guest auth is the MVP's primary path: no credentials, no platform, just an identifier the
+SDK generates once and reuses.
+
+```cpp
+lootlocker::auth::StartGuestSession(ll, [](lootlocker::Result<lootlocker::Session> r) {
+    if (!r.Ok()) {
+        my_log(r.Error().message);
+        return;
+    }
+    std::printf("player %s\n", r.Value().player_ulid.c_str());
+});
+
+while (ll.Update()) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+}
+```
+
+**The identifier reuse is the whole point.** A guest who loses their `player_identifier`
+silently becomes a new account with no inventory, so the SDK persists it and sends it back
+on the next launch. You do not have to do anything: the resolved identifier is written
+*before* the request is sent, so a crash between sending and receiving does not orphan the
+account the server just created.
+
+The resolution order is: `GuestSessionOptions::player_identifier` if you set it, then the
+persisted one, then a newly generated one. Setting it explicitly is for a game that manages
+its own identity; leaving it empty is what almost every caller wants.
+
+A successful session is stored on the client, so subsequent requests carry
+`x-session-token` and `ll.GetSession()` returns it. `ll.HasSession()` is the cheap check.
+
+```cpp
+lootlocker::GuestSessionOptions opts;
+opts.timezone    = "Europe/Stockholm";   // empty = resolve: provider, then OS, then Etc/UTC
+opts.player_name = "Erik";
+
+lootlocker::auth::StartGuestSession(ll, opts, on_session);
+```
+
+With a `NullStateWriter` every launch generates a new identifier, which is the documented
+cost of choosing not to persist.
+
+## Persistence
 
 The SDK remembers a session between launches through a `IStateWriter`. The default writes one
 file next to the game; a console or an engine injects its own.

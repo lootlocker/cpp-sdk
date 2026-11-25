@@ -81,6 +81,17 @@ struct ExecutorSettings {
     // The clock. Never null: the executor dereferences it, and a test supplies a fake.
     Clock* clock = nullptr;
 
+    // Supplies the session token to send as `x-session-token`, or an empty string when there
+    // is no session.
+    //
+    // A callback rather than a string, because the token changes when a session starts or
+    // ends and the executor must see the current one at send time, not the one that existed
+    // when the request was queued. A queued request that starts after a session begins
+    // should carry the new token.
+    //
+    // Empty means "no session support", which is what a test that does not care gets.
+    std::function<std::string()> session_token;
+
     std::weak_ptr<Logger> logger;
 
     // Empty when the config was usable. A non-empty error makes every submission reject with
@@ -192,6 +203,7 @@ private:
     std::weak_ptr<IHttpTransport>  m_transport;
     Clock&                         m_clock;
     std::weak_ptr<Logger>          m_logger;
+    std::function<std::string()>   m_session_token;
 
     std::int64_t m_last_tick_ms = 0;
     bool         m_has_ticked = false;

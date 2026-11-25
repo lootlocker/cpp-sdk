@@ -43,6 +43,7 @@ bool IsRetryableStatus(int status_code)
 Executor::Executor(const ExecutorSettings& settings)
     : m_config(settings.queue), m_config_error(settings.config_error),
       m_transport(settings.transport), m_clock(*settings.clock), m_logger(settings.logger),
+      m_session_token(settings.session_token),
       m_rate_limiter(settings.rate_limit, *settings.clock)
 {
 }
@@ -522,6 +523,19 @@ bool Executor::Update()
             // re-sends the same logical request with the same id - which is what makes a
             // server log show one id across attempts rather than one per attempt.
             request.headers.Set("LL-Request-Id", entry.id.ToString());
+
+            // The session token, read at send time rather than at queue time, so a request
+            // queued before a session started still carries the token once it is sent.
+            //
+            // Set here rather than by a definition, because it is identical for every
+            // endpoint and a definition that forgot it would produce a 401 that looks like
+            // an auth bug.
+            if (m_session_token) {
+                const std::string token = m_session_token();
+                if (!token.empty()) {
+                    request.headers.Set("x-session-token", token);
+                }
+            }
 
             ++entry.attempts;
             entry.started_at_ms = now;
