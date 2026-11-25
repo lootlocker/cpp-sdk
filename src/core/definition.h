@@ -15,6 +15,7 @@
 
 #include <lootlocker/client.h>
 #include <lootlocker/header_map.h>
+#include <lootlocker/json_builder.h>
 #include <lootlocker/json_value.h>
 #include <lootlocker/request_id.h>
 #include <lootlocker/result.h>
@@ -70,6 +71,39 @@ template <typename Def>
 typename std::enable_if<!HasNormalizeResponse<Def>::value>::type Normalize(
     typename Def::Response&, const RawResponse&)
 {
+}
+
+// Whether a request type has an ADL `to_json`, which is what decides if the request carries
+// a body (D27, owner 2026-11-25).
+//
+// The body is a property of the request type, not a hook on the definition, for the same
+// reason `from_json` is: a nested type that appears in several bodies - `optionals` in every
+// session start - needs one serialiser, and a definition hook would still have to call it.
+// One mechanism throughout.
+//
+// Detected rather than required, so a GET definition needs nothing: no `to_json`, no body,
+// no `Content-Type`.
+template <typename T, typename = void>
+struct HasToJson : std::false_type {};
+
+template <typename T>
+struct HasToJson<T, decltype(to_json(std::declval<JsonBuilder&>(), std::declval<const T&>()),
+                             void())> : std::true_type {};
+
+// Serialises `request` into a body, or returns an empty string when the type has no
+// `to_json`.
+template <typename T>
+typename std::enable_if<HasToJson<T>::value, std::string>::type BuildBody(const T& request)
+{
+    JsonBuilder builder;
+    to_json(builder, request);
+    return builder.ToJson();
+}
+
+template <typename T>
+typename std::enable_if<!HasToJson<T>::value, std::string>::type BuildBody(const T&)
+{
+    return std::string();
 }
 
 // The callback a caller supplies. Takes the `Result` by value, so a lambda, a
@@ -132,9 +166,10 @@ inline HeaderMap BuildDefaultHeaders(const Client& client)
 // callback never runs synchronously: it fires on the thread that calls `Client::Update()`
 // (D5), including when the request is rejected outright.
 //
-// **There is no request body.** Every endpoint in the MVP is a GET, and the spec has no
-// body-construction hook. Adding one is T13c's job, together with the `to_json` that would
-// fill it - see the note in tasks.md.
+// **The body comes from the request type's ADL `to_json`, when it has one.** A type without
+// one sends no body and no `Content-Type`, which is what keeps every GET definition
+// unchanged. `Content-Type` is set here rather than by a definition, because a body without
+// it is a request the server rejects and no definition should have to remember.
 template <typename Def>
 RequestId Send(Client& client, const typename Def::Request& request,
                ResponseCallback<Def> on_done)
@@ -143,6 +178,11 @@ RequestId Send(Client& client, const typename Def::Request& request,
     pending.method  = Def::kMethod;
     pending.url     = BuildUrl<Def>(client, request);
     pending.headers = BuildDefaultHeaders(client);
+    pending.body    = BuildBody(request);
+
+    if (!pending.body.empty()) {
+        pending.headers.Set("Content-Type", "application/json");
+    }
 
     // The definition's own headers come last, so an endpoint can override a default rather
     // than being stuck with it.

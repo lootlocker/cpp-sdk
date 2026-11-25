@@ -11,6 +11,7 @@
 #include <lootlocker/client.h>
 #include <lootlocker/config.h>
 #include <lootlocker/fake_http_transport.h>
+#include <lootlocker/json_builder.h>
 #include <lootlocker/json_value.h>
 #include <lootlocker/request_id.h>
 #include <lootlocker/result.h>
@@ -406,6 +407,187 @@ void TestQueryParameterDoubleFormatting()
     CHECK_EQ(query.ToQueryString(), "a=1&b=1.5&c=0.1");
 }
 
+// --- request bodies (T13d) -------------------------------------------------
+
+} // namespace
+
+namespace lootlocker {
+
+// The nested type every session start sends. It is the reason the body hook is an ADL
+// `to_json` rather than a definition hook: one serialiser, reused by three bodies.
+struct SessionOptionals {
+    std::string timezone;
+    std::string player_name;
+    bool        auto_create_profile = true;
+};
+
+void to_json(JsonBuilder& b, const SessionOptionals& in)
+{
+    b.Set("timezone", in.timezone);
+    b.Set("player_name", in.player_name);
+    b.Set("auto_create_profile", in.auto_create_profile);
+}
+
+struct GuestSessionRequest {
+    std::string      game_key;
+    std::string      game_version;
+    std::string      player_identifier;
+    SessionOptionals optionals;
+};
+
+void to_json(JsonBuilder& b, const GuestSessionRequest& in)
+{
+    b.Set("game_key", in.game_key);
+    b.Set("game_version", in.game_version);
+    b.Set("player_identifier", in.player_identifier);
+    b.Set("optionals", in.optionals);   // the nested type, through its own to_json
+}
+
+struct GuestSessionResponse {
+    std::string session_token;
+};
+
+Result<Empty> from_json(const JsonValue& j, GuestSessionResponse& out)
+{
+    out.session_token = j["session_token"].AsString();
+    return Result<Empty>::Ok(Empty());
+}
+
+namespace core {
+
+struct GuestSessionDef {
+    static constexpr const char* kMethod = "POST";
+    static constexpr const char* kPath   = "/game/v2/session/guest";
+
+    using Request  = GuestSessionRequest;
+    using Response = GuestSessionResponse;
+
+    static void ConstructQueryParameters(const Request&, QueryParameters&) {}
+
+    static void ConstructHeaders(const Request&, HeaderMap&) {}
+};
+
+} // namespace core
+} // namespace lootlocker
+
+namespace {
+
+using lootlocker::GuestSessionRequest;
+using lootlocker::GuestSessionResponse;
+using lootlocker::core::GuestSessionDef;
+
+// A POST carries the serialised body and a JSON content type.
+void TestRequestBodyIsSent()
+{
+    Fixture f;
+
+    GuestSessionRequest request;
+    request.game_key          = "gk";
+    request.game_version      = "1.0.0";
+    request.player_identifier = "player-1";
+    request.optionals.timezone      = "Europe/Stockholm";
+    request.optionals.player_name   = "Erik";
+    request.optionals.auto_create_profile = false;
+
+    lootlocker::core::Send<lootlocker::core::GuestSessionDef>(
+        *f.client, request, [](Result<GuestSessionResponse>) {});
+    f.client->Update();
+
+    const IHttpTransport::Request* sent = f.Sent();
+    CHECK(sent != nullptr);
+    if (sent == nullptr) {
+        return;
+    }
+
+    CHECK_EQ(sent->method, "POST");
+
+    std::string content_type;
+    CHECK(sent->headers.Get("Content-Type", content_type));
+    CHECK_EQ(content_type, "application/json");
+
+    // The nested object is serialised through its own `to_json`, which is the whole point of
+    // putting the hook on the type.
+    //
+    // Keys come out in sorted order, not insertion order: nlohmann stores an object in a
+    // `std::map`. That is correct for JSON, where an object is unordered by definition, and
+    // the server parses rather than pattern-matches. It is asserted exactly so a change in
+    // that behaviour is visible.
+    CHECK_EQ(sent->body,
+             R"({"game_key":"gk","game_version":"1.0.0",)"
+             R"("optionals":{"auto_create_profile":false,"player_name":"Erik",)"
+             R"("timezone":"Europe/Stockholm"},"player_identifier":"player-1"})");
+}
+
+// A GET definition has no `to_json`, so it sends no body and no content type. This is what
+// keeps the existing definitions unchanged.
+void TestNoBodyWithoutToJson()
+{
+    Fixture f;
+
+    ListBroadcastsRequest request;
+    request.limit = 1;
+
+    lootlocker::core::Send<ListBroadcastsDef>(*f.client, request,
+                                              [](Result<ListBroadcastsResponse>) {});
+    f.client->Update();
+
+    const IHttpTransport::Request* sent = f.Sent();
+    CHECK(sent != nullptr);
+    if (sent == nullptr) {
+        return;
+    }
+
+    CHECK_EQ(sent->body, "");
+    CHECK(!sent->headers.Has("Content-Type"));
+}
+
+// The trait is what makes the two cases above work, so it is asserted directly.
+void TestBodyTrait()
+{
+    CHECK(lootlocker::core::HasToJson<GuestSessionRequest>::value);
+    CHECK(!lootlocker::core::HasToJson<ListBroadcastsRequest>::value);
+}
+
+// A string literal must not become `true`, the same trap `QueryParameters::Add` had.
+void TestBuilderStringLiteral()
+{
+    lootlocker::JsonBuilder b;
+    b.Set("name", "abc");
+    CHECK_EQ(b.ToJson(), R"({"name":"abc"})");
+}
+
+// A uint64 above 2^63 must round-trip rather than wrap negative.
+void TestBuilderUnsigned()
+{
+    lootlocker::JsonBuilder b;
+    b.Set("big", static_cast<std::uint64_t>(18446744073709551615ULL));
+    CHECK_EQ(b.ToJson(), R"({"big":18446744073709551615})");
+}
+
+// A null `const char*` is JSON null, not an empty string.
+void TestBuilderNullPointer()
+{
+    lootlocker::JsonBuilder b;
+    const char* nothing = nullptr;
+    b.Set("x", nothing);
+    CHECK_EQ(b.ToJson(), R"({"x":null})");
+}
+
+// Invalid UTF-8 must not abort the process. With exceptions off, nlohmann's default error
+// handler throws, and a throw under `JSON_NOEXCEPTION` is an abort.
+void TestBuilderInvalidUtf8DoesNotAbort()
+{
+    lootlocker::JsonBuilder b;
+    // Split so `\xFE` does not swallow the following `b` as a hex digit.
+    b.Set("name", std::string("bad\xFF\xFE" "byte"));
+    const std::string out = b.ToJson();
+    CHECK(!out.empty());
+    // The bad bytes are replaced with U+FFFD rather than aborting, and the rest of the
+    // string survives.
+    CHECK(out.find("\"name\":\"bad") != std::string::npos);
+    CHECK(out.find("byte\"") != std::string::npos);
+}
+
 } // namespace
 
 int main()
@@ -421,5 +603,12 @@ int main()
     TestQueryParameterEncoding();
     TestQueryParameterEmpty();
     TestQueryParameterDoubleFormatting();
+    TestRequestBodyIsSent();
+    TestNoBodyWithoutToJson();
+    TestBodyTrait();
+    TestBuilderStringLiteral();
+    TestBuilderUnsigned();
+    TestBuilderNullPointer();
+    TestBuilderInvalidUtf8DoesNotAbort();
     return testing::Report();
 }
