@@ -31,5 +31,21 @@ Result<JsonValue> ParseJson(const std::string& text);
 // the original bytes (D7).
 std::string SerializeJson(const JsonValue& value);
 
+// Decodes `value` into `out` through the type's ADL `from_json` (D27).
+//
+// **`from_json` returns `Result<Empty>`, not `void`.** The api-sketch draws it as `void`,
+// which cannot express D23's rule that a missing field is a decode error rather than a
+// zero: a `void` decoder has no way to say "this field was absent". Returning a `Result`
+// is the smallest change that makes the rule enforceable, and it costs a decoder nothing
+// when it succeeds.
+//
+// Found by ADL rather than by a trait, so a decoder lives next to its type and a type in
+// another namespace works without registration.
+template <typename T>
+Result<Empty> DecodeJson(const JsonValue& value, T& out)
+{
+    return from_json(value, out);
+}
+
 } // namespace core
 } // namespace lootlocker

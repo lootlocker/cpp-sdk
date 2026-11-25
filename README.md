@@ -239,18 +239,28 @@ struct PlayerStats {
     std::string   rank;
 };
 
-void from_json(const lootlocker::JsonValue& j, PlayerStats& out)
+lootlocker::Result<lootlocker::Empty> from_json(const lootlocker::JsonValue& j,
+                                                PlayerStats& out)
 {
     // `IsUnsigned()` matters: reading a uint64 through AsDouble() loses precision above
     // 2^53, which is the one hazard the JSON spike found.
-    if (j["total_score"].IsUnsigned()) {
-        out.total_score = j["total_score"].AsUInt64();
+    if (!j["total_score"].IsUnsigned()) {
+        lootlocker::Error e;
+        e.code    = lootlocker::ErrorCode::MalformedResponse;
+        e.message = "total_score is missing or not an unsigned integer";
+        return lootlocker::Result<lootlocker::Empty>::Fail(e);
     }
-    out.rank = j["rank"].AsString();
+    out.total_score = j["total_score"].AsUInt64();
+    out.rank        = j["rank"].AsString();
+    return lootlocker::Result<lootlocker::Empty>::Ok(lootlocker::Empty());
 }
 
 } // namespace my_game
 ```
+
+**`from_json` returns a `Result`, not `void`.** That is what lets a decoder say "this field
+was absent" instead of silently defaulting it to zero — the failure mode the SDK's error
+model exists to prevent. A decoder that has nothing to reject returns `Ok(Empty())`.
 
 `JsonValue` gives you `GetKind()`, `IsInteger()`, `IsUnsigned()`, the typed `As*` reads,
 `operator[]`, `HasKey()`, `Size()` and `At()`. An absent key is `Kind::Invalid`, which is
