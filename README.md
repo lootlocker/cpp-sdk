@@ -328,6 +328,63 @@ definition.
 over a shared, immutable document, which is what makes it cheap to pass around and safe to
 hold across a callback. Writing needs its own type.
 
+### Persistence
+
+The SDK remembers a session between launches through a `StateWriter`. The default writes one
+file next to the game; a console or an engine injects its own.
+
+```cpp
+// The default: one file, next to the game.
+lootlocker::Config config;
+config.domain_key = "your-domain";
+
+// Or your own store, for a console's save-data API or an engine's settings.
+config.state_writer = my_engine_state_writer;
+
+// Or nothing at all, if you would rather re-authenticate every launch.
+config.state_writer = std::make_shared<lootlocker::NullStateWriter>();
+```
+
+The interface is typed rather than strings-only, because a store that only speaks strings
+forces every adopter to write the same conversions and get the same rounding wrong:
+
+```cpp
+class StateWriter {
+public:
+    virtual bool GetString(const std::string& key, std::string& out) = 0;
+    virtual void SetString(const std::string& key, const std::string& value) = 0;
+
+    virtual bool GetInt64(const std::string& key, std::int64_t& out) = 0;
+    virtual void SetInt64(const std::string& key, std::int64_t value) = 0;
+
+    virtual bool GetUInt64(const std::string& key, std::uint64_t& out) = 0;
+    virtual void SetUInt64(const std::string& key, std::uint64_t value) = 0;
+
+    virtual bool GetDouble(const std::string& key, double& out) = 0;
+    virtual void SetDouble(const std::string& key, double value) = 0;
+
+    virtual bool GetBool(const std::string& key, bool& out) = 0;
+    virtual void SetBool(const std::string& key, bool value) = 0;
+
+    virtual void Erase(const std::string& key) = 0;
+    virtual bool Has(const std::string& key) = 0;
+};
+```
+
+`GetUInt64` exists separately from `GetInt64` because `player_id` is a `uint64` on the wire
+and a valid id above `INT64_MAX` must round-trip exactly. A getter returns `false` and leaves
+`out` untouched when the key is absent **or holds a different type** — it never converts,
+because guessing is how a corrupt store becomes a wrong player id.
+
+Implementations must not throw. Persistence is best-effort: a failed write never fails a
+request.
+
+`FileStateWriter` writes a flat `type:key=value` text file, whole, on every change. It is
+**not atomic across a crash** — a power loss mid-write loses the file, and the cost is one
+re-authentication. Write-temp-then-rename is not portable to every platform this SDK
+targets, so the limitation is documented rather than hidden. A corrupt line is skipped on
+load rather than losing the whole file.
+
 ### There is no parser seam
 
 Unlike the transport or the state writer, the JSON parser is not injectable. It is internal

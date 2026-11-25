@@ -75,6 +75,11 @@ target_link_libraries(test_definition PRIVATE LootLocker::core lootlocker_compil
 target_include_directories(test_definition PRIVATE ${CMAKE_SOURCE_DIR}/src/core)
 add_test(NAME definition COMMAND test_definition)
 
+# The StateWriter seam (T12a). Public surface, so no `src/` include path is needed.
+add_executable(test_state_writer test_state_writer.cpp)
+target_link_libraries(test_state_writer PRIVATE LootLocker::core lootlocker_compile_options)
+add_test(NAME state_writer COMMAND test_state_writer)
+
 # The end-to-end transport test (T11, owner 2026-11-13): a real round trip through the real
 # curl transport against a loopback server, plus the proof that `Config::transport` is
 # actually consulted.
