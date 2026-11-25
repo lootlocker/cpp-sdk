@@ -153,7 +153,19 @@ std::int64_t JsonValue::AsInt64() const
     if (value->is_number_integer()) {
         return value->get<std::int64_t>();
     }
-    return static_cast<std::int64_t>(value->get<double>());
+
+    // A float. `1e100` is valid JSON and does not fit an `int64_t`, and converting an
+    // out-of-range `double` to an integer is undefined behaviour rather than a clamp - so
+    // the range is checked before the cast, and the non-representable result is defined as
+    // the saturated bound rather than left to the platform.
+    const double raw = value->get<double>();
+    if (!(raw >= -9223372036854775808.0)) {   // also false for NaN
+        return -9223372036854775807LL - 1;
+    }
+    if (!(raw < 9223372036854775808.0)) {
+        return 9223372036854775807LL;
+    }
+    return static_cast<std::int64_t>(raw);
 }
 
 std::uint64_t JsonValue::AsUInt64() const
@@ -170,8 +182,17 @@ std::uint64_t JsonValue::AsUInt64() const
         const auto raw = value->get<std::int64_t>();
         return raw < 0 ? 0 : static_cast<std::uint64_t>(raw);
     }
+
+    // A float. Checked before the cast for the same reason as `AsInt64`: an out-of-range
+    // `double` to `uint64_t` conversion is undefined behaviour, and `1e100` is valid JSON.
     const double raw = value->get<double>();
-    return raw < 0.0 ? 0 : static_cast<std::uint64_t>(raw);
+    if (!(raw > 0.0)) {   // also false for NaN
+        return 0;
+    }
+    if (!(raw < 18446744073709551616.0)) {
+        return 18446744073709551615ULL;
+    }
+    return static_cast<std::uint64_t>(raw);
 }
 
 std::string JsonValue::AsString() const
@@ -211,8 +232,10 @@ bool JsonValue::HasKey(const std::string& key) const
 
 std::size_t JsonValue::Size() const
 {
-    const Kind kind = GetKind();
-    if (kind != Kind::Array && kind != Kind::Object) {
+    // Arrays only, as documented. An object reporting its member count would make a caller
+    // treat it as an array-sized value, and `At()` on an object returns invalid anyway - so
+    // the two would disagree.
+    if (GetKind() != Kind::Array) {
         return 0;
     }
     return Resolve(*m_impl->document, m_impl->path)->size();
@@ -261,38 +284,20 @@ std::string SerializeJson(const JsonValue& value)
         return std::string();
     }
 
-    // Rebuilt from the public surface rather than reaching into the impl, so this stays a
-    // consumer of the handle like everything else. Only tests and logging use it - the SDK
+    // Serialised from the resolved document rather than rebuilt through the public surface.
+    //
+    // Rebuilding was wrong in two ways: a number went through `AsDouble()`, so an integer
+    // like 9007199254740993 came back as 9007199254740992; and an object inside an array
+    // serialised to an empty string, which the non-throwing parse then turned into a
+    // discarded value - and `dump()` on a discarded value aborts under `JSON_NOEXCEPTION`.
+    //
+    // This is `core`, so it can reach the impl. Only tests and logging use it - the SDK
     // never re-serialises a response, because `RawBody()` is the original bytes (D7).
-    switch (value.GetKind()) {
-    case JsonValue::Kind::Null:
-        return "null";
-    case JsonValue::Kind::Bool:
-        return value.AsBool() ? "true" : "false";
-    case JsonValue::Kind::Number: {
-        const nlohmann::json number = value.AsDouble();
-        return number.dump();
-    }
-    case JsonValue::Kind::String: {
-        const nlohmann::json string = value.AsString();
-        return string.dump();
-    }
-    case JsonValue::Kind::Array: {
-        nlohmann::json array = nlohmann::json::array();
-        for (std::size_t i = 0; i < value.Size(); ++i) {
-            array.push_back(nlohmann::json::parse(SerializeJson(value.At(i)), nullptr, false));
-        }
-        return array.dump();
-    }
-    case JsonValue::Kind::Object:
-        // Object keys are not exposed by the handle, so an object cannot be rebuilt. Nothing
-        // in the SDK needs it, and adding a key iterator to the public surface to support a
-        // test helper would be the wrong trade.
-        return std::string();
-    case JsonValue::Kind::Invalid:
-    default:
+    const nlohmann::json* resolved = Resolve(*value.m_impl->document, value.m_impl->path);
+    if (resolved == nullptr) {
         return std::string();
     }
+    return resolved->dump();
 }
 
 } // namespace core
