@@ -12,13 +12,28 @@ Error Missing(const char* field)
     return e;
 }
 
+// A present field of the wrong type. Distinct from "missing", because the two are different
+// bugs and a message that says "missing" for a present field sends the reader looking in the
+// wrong place.
+Error WrongType(const char* field, const char* expected)
+{
+    Error e;
+    e.code    = ErrorCode::MalformedResponse;
+    e.message = std::string("the session response has a non-") + expected + " " + field;
+    return e;
+}
+
 // A required string. Absent, null and non-string are all failures, because a session field
 // the SDK depends on must not be silently defaulted (D23).
 bool ReadRequiredString(const JsonValue& j, const char* key, std::string& out, Error& error)
 {
     const JsonValue value = j[key];
-    if (value.GetKind() != JsonValue::Kind::String) {
+    if (value.GetKind() == JsonValue::Kind::Invalid || value.GetKind() == JsonValue::Kind::Null) {
         error = Missing(key);
+        return false;
+    }
+    if (value.GetKind() != JsonValue::Kind::String) {
+        error = WrongType(key, "string");
         return false;
     }
     out = value.AsString();
@@ -35,7 +50,7 @@ bool ReadOptionalString(const JsonValue& j, const char* key, std::string& out, E
         return true;
     }
     if (value.GetKind() != JsonValue::Kind::String) {
-        error = Missing(key);
+        error = WrongType(key, "string");
         return false;
     }
     out = value.AsString();
@@ -49,7 +64,7 @@ bool ReadOptionalBool(const JsonValue& j, const char* key, bool& out, Error& err
         return true;
     }
     if (value.GetKind() != JsonValue::Kind::Bool) {
-        error = Missing(key);
+        error = WrongType(key, "boolean");
         return false;
     }
     out = value.AsBool();
@@ -80,8 +95,12 @@ Result<Empty> from_json(const JsonValue& j, Session& out)
     // `player_id` is required and must be an unsigned integer. Reading it through
     // `AsDouble()` would lose precision above 2^53, which is the hazard D4 exists for.
     const JsonValue player_id = j["player_id"];
-    if (!player_id.IsUnsigned()) {
+    if (player_id.GetKind() == JsonValue::Kind::Invalid ||
+        player_id.GetKind() == JsonValue::Kind::Null) {
         return Result<Empty>::Fail(Missing("player_id"));
+    }
+    if (!player_id.IsUnsigned()) {
+        return Result<Empty>::Fail(WrongType("player_id", "unsigned integer"));
     }
     out.player_id = player_id.AsUInt64();
 

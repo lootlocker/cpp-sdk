@@ -161,6 +161,20 @@ inline HeaderMap BuildDefaultHeaders(const Client& client)
     return headers;
 }
 
+// Whether a definition's response type can legitimately be empty.
+//
+// The generic `Send` treats an empty body as success, because a 204 is the one legitimate
+// empty success (`EndSession`). That is wrong for a definition whose response carries
+// required fields: a 200 with an empty body would become an all-default `Session`, and
+// `HasSession()` would report true with no token. Such a definition opts out by declaring
+// `static constexpr bool kAllowEmptyResponse = false;`.
+template <typename Def, typename = void>
+struct AllowsEmptyResponse : std::true_type {};
+
+template <typename Def>
+struct AllowsEmptyResponse<Def, decltype(void(Def::kAllowEmptyResponse))>
+    : std::integral_constant<bool, Def::kAllowEmptyResponse> {};
+
 // Sends one request described by `Def` and delivers the decoded response to `on_done`.
 //
 // Returns the id the executor assigned, which is the same id sent as `LL-Request-Id`. The
@@ -200,9 +214,15 @@ RequestId Send(Client& client, const typename Def::Request& request,
             // documents it as such. Parsing an empty body would report `MalformedResponse`
             // for a request that succeeded, so it is handled before the parser sees it.
             //
+            // A definition whose response carries required fields opts out with
+            // `kAllowEmptyResponse = false`, because for it an empty body is a malformed
+            // response rather than a success - a 200 with no body must not become an
+            // all-default value that looks valid.
+            //
             // `NormalizeResponse` still runs, because a definition may want to fill in
             // derived fields on an empty response too.
-            if (completion.status_code == 204 || completion.body.empty()) {
+            if (completion.status_code == 204 ||
+                (completion.body.empty() && AllowsEmptyResponse<Def>::value)) {
                 typename Def::Response response;
 
                 RawResponse raw;

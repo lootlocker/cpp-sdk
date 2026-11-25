@@ -132,7 +132,9 @@ void TestGuestSessionRequest()
     CHECK(!sent->headers.Has("x-session-token"));
 }
 
-// The optionals are sent only when set.
+// The optionals are sent only when set. `timezone` is the exception: it is resolved from the
+// config, the provider and finally the default, so it is always present unless
+// `send_timezone` is false (covered by `TestSendTimezoneFalse`).
 void TestOptionalsAreOmittedWhenEmpty()
 {
     std::shared_ptr<NullStateWriter> keep_alive;
@@ -147,9 +149,9 @@ void TestOptionalsAreOmittedWhenEmpty()
         return;
     }
 
-    CHECK(sent->body.find("timezone") == std::string::npos);
     CHECK(sent->body.find("locale") == std::string::npos);
     CHECK(sent->body.find("player_name") == std::string::npos);
+    CHECK(sent->body.find("character_name") == std::string::npos);
 }
 
 void TestOptionalsAreSentWhenSet()
@@ -439,6 +441,171 @@ void TestNullWriterGeneratesNewIdentifierEachTime()
     CHECK(first != second);
 }
 
+// The optionals are nested under `optionals`, not at the root. The backend's `GuestInput`
+// carries `Optionals Optionals` tagged `json:"optionals"`, so a root-level `timezone` is
+// silently ignored and the player gets UTC.
+void TestOptionalsAreNested()
+{
+    std::shared_ptr<NullStateWriter> keep_alive;
+    Fixture f(MakeConfigWithoutPersistence(keep_alive));
+
+    lootlocker::GuestSessionOptions opts;
+    opts.timezone    = "Europe/Stockholm";
+    opts.locale      = "sv-SE";
+    opts.player_name = "Erik";
+
+    lootlocker::auth::StartGuestSession(*f.client, opts, [](Result<Session>) {});
+    f.client->Update();
+
+    const IHttpTransport::Request* sent = f.Sent();
+    CHECK(sent != nullptr);
+    if (sent == nullptr) {
+        return;
+    }
+
+    CHECK(sent->body.find(R"("optionals":{)") != std::string::npos);
+    CHECK(sent->body.find(R"("timezone":"Europe/Stockholm")") != std::string::npos);
+    CHECK(sent->body.find(R"("locale":"sv-SE")") != std::string::npos);
+    CHECK(sent->body.find(R"("player_name":"Erik")") != std::string::npos);
+
+    // And not at the root: the only root-level keys are the four the API expects.
+    const std::size_t optionals_at = sent->body.find(R"("optionals")");
+    CHECK(sent->body.find(R"("timezone")") > optionals_at);
+}
+
+// The timezone falls back to the config, then the provider, then the default - and is
+// normalised to an IANA name, because a Windows name sent as-is gets UTC server-side.
+void TestTimezoneResolution()
+{
+    std::shared_ptr<NullStateWriter> keep_alive;
+
+    // A Windows name in the config is normalised.
+    Config config = MakeConfigWithoutPersistence(keep_alive);
+    config.timezone = "W. Europe Standard Time";
+
+    Fixture f(config);
+    lootlocker::auth::StartGuestSession(*f.client, [](Result<Session>) {});
+    f.client->Update();
+
+    const IHttpTransport::Request* sent = f.Sent();
+    CHECK(sent != nullptr);
+    if (sent != nullptr) {
+        CHECK(sent->body.find(R"("timezone":"Europe/Berlin")") != std::string::npos);
+    }
+}
+
+// `send_timezone = false` sends no timezone at all, which is a different statement from
+// "I have no opinion".
+void TestSendTimezoneFalse()
+{
+    std::shared_ptr<NullStateWriter> keep_alive;
+    Config config = MakeConfigWithoutPersistence(keep_alive);
+    config.send_timezone = false;
+
+    Fixture f(config);
+    lootlocker::auth::StartGuestSession(*f.client, [](Result<Session>) {});
+    f.client->Update();
+
+    const IHttpTransport::Request* sent = f.Sent();
+    CHECK(sent != nullptr);
+    if (sent != nullptr) {
+        CHECK(sent->body.find("timezone") == std::string::npos);
+    }
+}
+
+// A 200 with an empty body is a malformed response for a definition whose response carries
+// required fields. Without this it would become an all-default `Session` and `HasSession()`
+// would report true with no token.
+void TestEmptyBodyIsNotASuccess()
+{
+    std::shared_ptr<NullStateWriter> keep_alive;
+    Fixture f(MakeConfigWithoutPersistence(keep_alive));
+
+    bool      called = false;
+    ErrorCode code   = ErrorCode::None;
+
+    lootlocker::auth::StartGuestSession(*f.client, [&](Result<Session> result) {
+        called = true;
+        if (!result.Ok()) {
+            code = result.Error().code;
+        }
+    });
+
+    f.client->Update();
+    f.transport->Complete(f.transport->Order().front(), 200, "");
+    f.client->Update();
+
+    CHECK(called);
+    CHECK(code == ErrorCode::MalformedResponse);
+    CHECK(!f.client->HasSession());
+}
+
+// A present field of the wrong type says so, rather than claiming it is missing.
+void TestWrongTypeMessage()
+{
+    std::shared_ptr<NullStateWriter> keep_alive;
+    Fixture f(MakeConfigWithoutPersistence(keep_alive));
+
+    std::string message;
+
+    lootlocker::auth::StartGuestSession(*f.client, [&](Result<Session> result) {
+        if (!result.Ok()) {
+            message = result.Error().message;
+        }
+    });
+
+    f.client->Update();
+    // `session_token` is present but a number.
+    f.transport->Complete(f.transport->Order().front(), 200,
+                          R"({"session_token":42,"player_identifier":"p","player_ulid":"u",)"
+                          R"("public_uid":"x","player_id":1})");
+    f.client->Update();
+
+    CHECK(message.find("non-string") != std::string::npos);
+    CHECK(message.find("missing") == std::string::npos);
+}
+
+// An explicit identifier is persisted too, so a game that supplies one on the first launch
+// and relies on the SDK afterwards does not get a different account.
+void TestExplicitIdentifierIsPersisted()
+{
+    TempFile file("explicit-persist");
+
+    std::shared_ptr<lootlocker::FileStateWriter> writer =
+        std::make_shared<lootlocker::FileStateWriter>(file.path);
+
+    Config config = MakeConfig();
+    config.state_writer = writer;
+
+    {
+        Fixture f(config);
+
+        lootlocker::GuestSessionOptions opts;
+        opts.player_identifier = "chosen-by-the-game";
+
+        lootlocker::auth::StartGuestSession(*f.client, opts, [](Result<Session>) {});
+        f.client->Update();
+    }
+
+    // A second launch, with no explicit identifier: the persisted one is used.
+    std::shared_ptr<lootlocker::FileStateWriter> reopened =
+        std::make_shared<lootlocker::FileStateWriter>(file.path);
+
+    Config second = MakeConfig();
+    second.state_writer = reopened;
+
+    Fixture f(second);
+    lootlocker::auth::StartGuestSession(*f.client, [](Result<Session>) {});
+    f.client->Update();
+
+    const IHttpTransport::Request* sent = f.Sent();
+    CHECK(sent != nullptr);
+    if (sent != nullptr) {
+        CHECK(sent->body.find(R"("player_identifier":"chosen-by-the-game")") !=
+              std::string::npos);
+    }
+}
+
 // --- the client accessors --------------------------------------------------
 
 void TestSessionAccessors()
@@ -484,7 +651,13 @@ int main()
     TestMissingOptionalFieldIsFine();
     TestPlayerIdentifierIsReusedAcrossRestarts();
     TestExplicitIdentifierWins();
+    TestExplicitIdentifierIsPersisted();
     TestNullWriterGeneratesNewIdentifierEachTime();
+    TestOptionalsAreNested();
+    TestTimezoneResolution();
+    TestSendTimezoneFalse();
+    TestEmptyBodyIsNotASuccess();
+    TestWrongTypeMessage();
     TestSessionAccessors();
     TestReturnsExecutorId();
     return testing::Report();
