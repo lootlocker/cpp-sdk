@@ -60,6 +60,13 @@ target_link_libraries(test_rate_limiter PRIVATE LootLocker::core lootlocker_comp
 target_include_directories(test_rate_limiter PRIVATE ${CMAKE_SOURCE_DIR}/src/core)
 add_test(NAME rate_limiter COMMAND test_rate_limiter)
 
+# The JSON layer (T13b). `src/core` is on the include path because `ParseJson` is internal
+# (D18) - an adopter sees only `JsonValue`.
+add_executable(test_json test_json.cpp)
+target_link_libraries(test_json PRIVATE LootLocker::core lootlocker_compile_options)
+target_include_directories(test_json PRIVATE ${CMAKE_SOURCE_DIR}/src/core)
+add_test(NAME json COMMAND test_json)
+
 # The end-to-end transport test (T11, owner 2026-11-13): a real round trip through the real
 # curl transport against a loopback server, plus the proof that `Config::transport` is
 # actually consulted.
