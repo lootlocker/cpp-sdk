@@ -1,6 +1,7 @@
 #include <lootlocker/state_writer.h>
 
 #include <cerrno>
+#include <clocale>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -102,7 +103,21 @@ std::string FormatDouble(double value)
     // value the SDK wrote itself, which is the one thing a store must not do.
     char buffer[64];
     std::snprintf(buffer, sizeof(buffer), "%.17g", value);
-    return std::string(buffer);
+
+    // `%g` is governed by the process-wide `LC_NUMERIC` locale, so in a comma-decimal locale
+    // this writes `0,1` - and `GetDouble` uses `strtod`, which under the same locale would
+    // read it back, but under a *different* locale (the game changed it, or the file was
+    // written on another machine) would not. Normalising to '.' makes the file
+    // locale-independent, which is what a persisted format has to be.
+    std::string text(buffer);
+    const char* decimal_point = std::localeconv()->decimal_point;
+    if (decimal_point != nullptr && *decimal_point != '\0' && std::string(decimal_point) != ".") {
+        const std::size_t at = text.find(decimal_point);
+        if (at != std::string::npos) {
+            text.replace(at, std::string(decimal_point).size(), ".");
+        }
+    }
+    return text;
 }
 
 } // namespace

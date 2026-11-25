@@ -330,26 +330,33 @@ hold across a callback. Writing needs its own type.
 
 ### Persistence
 
-The SDK remembers a session between launches through a `StateWriter`. The default writes one
+The SDK remembers a session between launches through a `IStateWriter`. The default writes one
 file next to the game; a console or an engine injects its own.
 
 ```cpp
-// The default: one file, next to the game.
+// The default: one file, next to the game. Constructed lazily, on first use, so a client
+// that never persists anything performs no file I/O.
 lootlocker::Config config;
 config.domain_key = "your-domain";
 
 // Or your own store, for a console's save-data API or an engine's settings.
-config.state_writer = my_engine_state_writer;
+//
+// Keep the shared_ptr alive for as long as the client uses it: the client holds a weak_ptr,
+// so a temporary would expire before the client was even constructed.
+std::shared_ptr<MyEngineStateWriter> my_writer = std::make_shared<MyEngineStateWriter>();
+config.state_writer = my_writer;
 
 // Or nothing at all, if you would rather re-authenticate every launch.
-config.state_writer = std::make_shared<lootlocker::NullStateWriter>();
+std::shared_ptr<lootlocker::NullStateWriter> no_persistence =
+    std::make_shared<lootlocker::NullStateWriter>();
+config.state_writer = no_persistence;
 ```
 
 The interface is typed rather than strings-only, because a store that only speaks strings
 forces every adopter to write the same conversions and get the same rounding wrong:
 
 ```cpp
-class StateWriter {
+class IStateWriter {
 public:
     virtual bool GetString(const std::string& key, std::string& out) = 0;
     virtual void SetString(const std::string& key, const std::string& value) = 0;

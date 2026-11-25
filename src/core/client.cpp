@@ -31,11 +31,24 @@ struct Client::Impl {
     // in, which is a supported configuration: the adopter injects their own.
     std::shared_ptr<IHttpTransport> owned_transport;
 
-    // The state writer. The default is always constructed, so the client can fall back to it
-    // when an injected writer dies - the seam is "adopter owns, SDK observes", so the
-    // injected one is held weakly and may expire at any time.
-    std::shared_ptr<StateWriter> default_state_writer;
-    std::weak_ptr<StateWriter>   state_writer;
+    // The state writer. The default is constructed lazily, on first use, so a client that
+    // never persists anything performs no file I/O - which is what keeps the "no implicit
+    // config" non-negotiable true (D9). An injected writer is held weakly and may expire at
+    // any time, so the default is also the fallback.
+    mutable std::shared_ptr<IStateWriter> default_state_writer;
+    std::weak_ptr<IStateWriter>           state_writer;
+
+    // The writer to use, constructing the default on first call.
+    std::shared_ptr<IStateWriter> ResolveStateWriter() const
+    {
+        if (std::shared_ptr<IStateWriter> live = state_writer.lock()) {
+            return live;
+        }
+        if (!default_state_writer) {
+            default_state_writer = std::make_shared<FileStateWriter>();
+        }
+        return default_state_writer;
+    }
 
     core::SteadyClock clock;
     std::unique_ptr<core::Executor> executor;
@@ -117,15 +130,10 @@ Client::Client(const Config& config) : m_impl(new Impl())
 #endif
     }
 
-    // The state writer: the injected one wins, otherwise the file default. The default is
-    // always constructed, because an injected writer is held weakly and may expire later -
-    // the client then falls back to this rather than having nothing to persist to.
-    m_impl->default_state_writer = std::make_shared<FileStateWriter>();
-    if (std::shared_ptr<StateWriter> injected = config.state_writer.lock()) {
-        m_impl->state_writer = injected;
-    } else {
-        m_impl->state_writer = m_impl->default_state_writer;
-    }
+    // The state writer: the injected one wins, otherwise the file default is constructed
+    // lazily on first use. Deliberately NOT constructed here - a client that never persists
+    // anything must perform no file I/O, which is what keeps "no implicit config" true (D9).
+    m_impl->state_writer = config.state_writer;
 
     core::ExecutorSettings settings;
     settings.queue = config.queue;
@@ -183,27 +191,20 @@ const std::string& Client::GetInstanceIdentifier() const
     return m_impl->instance_identifier;
 }
 
-void Client::SetStateWriter(std::weak_ptr<StateWriter> writer)
+void Client::SetStateWriter(std::weak_ptr<IStateWriter> writer)
 {
-    if (std::shared_ptr<StateWriter> resolved = writer.lock()) {
-        m_impl->state_writer = resolved;
-        return;
-    }
-    // An empty or dead writer falls back to the default rather than leaving the client with
-    // nothing. A game that wants no persistence injects a `NullStateWriter` explicitly,
+    // An empty or dead writer falls back to the default, which is constructed lazily on
+    // first use. A game that wants no persistence injects a `NullStateWriter` explicitly,
     // which is a different statement from "I forgot".
-    m_impl->state_writer = m_impl->default_state_writer;
+    m_impl->state_writer = writer;
 }
 
-std::weak_ptr<StateWriter> Client::GetStateWriter() const
+std::weak_ptr<IStateWriter> Client::GetStateWriter() const
 {
     // Resolved at read time, not at set time: the injected writer is held weakly, so it may
     // have died since. Returning the expired handle would leave the caller with nothing to
     // persist to, which is the opposite of what a default is for.
-    if (std::shared_ptr<StateWriter> live = m_impl->state_writer.lock()) {
-        return live;
-    }
-    return m_impl->default_state_writer;
+    return m_impl->ResolveStateWriter();
 }
 
 namespace core {
