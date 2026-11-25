@@ -1,4 +1,4 @@
-// The StateWriter seam (T12a).
+// The IStateWriter seam (T12a).
 //
 // The verification the task asks for: each typed accessor round-trips its type; the null
 // writer persists nothing and the client still works; a `uint64` above `INT64_MAX`
@@ -11,6 +11,7 @@
 
 #include "test_harness.h"
 
+#include <clocale>
 #include <cstdio>
 #include <memory>
 #include <string>
@@ -21,7 +22,7 @@ using lootlocker::Client;
 using lootlocker::Config;
 using lootlocker::FileStateWriter;
 using lootlocker::NullStateWriter;
-using lootlocker::StateWriter;
+using lootlocker::IStateWriter;
 
 // A scratch file that removes itself, so a failing test does not leave state behind for the
 // next run to trip over.
@@ -270,6 +271,67 @@ void TestClientHasADefaultWriter()
     CHECK(!client.GetStateWriter().expired());
 }
 
+// The default is constructed lazily, so a client that never persists anything performs no
+// file I/O. That is what keeps the "no implicit config" non-negotiable true (D9): the SDK
+// must not read a file on its own.
+//
+// The discriminator is *when* the read happens. `FileStateWriter` reads its file in its
+// constructor, so the probe is deleted between constructing the client and first asking for
+// the writer: a lazy default then finds nothing to load, an eager one has already loaded it.
+void TestDefaultWriterIsLazy()
+{
+    const std::string probe = "lootlocker-state.txt";
+    std::remove(probe.c_str());
+
+    {
+        std::FILE* f = std::fopen(probe.c_str(), "wb");
+        CHECK(f != nullptr);
+        if (f != nullptr) {
+            std::fputs("s:probe=loaded\n", f);
+            std::fclose(f);
+        }
+    }
+
+    Client client(MakeConfig());
+
+    // Remove the file before the writer is ever asked for. An eager default has already read
+    // it; a lazy one has not.
+    std::remove(probe.c_str());
+
+    std::shared_ptr<IStateWriter> writer = client.GetStateWriter().lock();
+    CHECK(writer != nullptr);
+    if (writer != nullptr) {
+        std::string out;
+        CHECK(!writer->GetString("probe", out));
+    }
+
+    std::remove(probe.c_str());
+}
+
+// An injected writer means the default is never constructed at all, so no file is touched
+// even when the writer is used.
+void TestInjectedWriterMeansNoFileIo()
+{
+    const std::string probe = "lootlocker-state.txt";
+    std::remove(probe.c_str());
+
+    std::shared_ptr<NullStateWriter> writer = std::make_shared<NullStateWriter>();
+
+    Config config = MakeConfig();
+    config.state_writer = writer;
+
+    Client client(config);
+    client.GetStateWriter().lock()->SetString("k", "v");
+
+    std::FILE* f = std::fopen(probe.c_str(), "rb");
+    CHECK(f == nullptr);
+    if (f != nullptr) {
+        std::fclose(f);
+    }
+
+    std::remove(probe.c_str());
+}
+
 // An injected writer is the one used.
 void TestClientUsesInjectedWriter()
 {
@@ -280,7 +342,7 @@ void TestClientUsesInjectedWriter()
 
     Client client(config);
 
-    std::shared_ptr<StateWriter> in_use = client.GetStateWriter().lock();
+    std::shared_ptr<IStateWriter> in_use = client.GetStateWriter().lock();
     CHECK(in_use != nullptr);
     CHECK(in_use.get() == writer.get());
 }
@@ -316,7 +378,7 @@ void TestSetStateWriterAtRuntime()
     std::shared_ptr<NullStateWriter> replacement = std::make_shared<NullStateWriter>();
     client.SetStateWriter(replacement);
 
-    std::shared_ptr<StateWriter> in_use = client.GetStateWriter().lock();
+    std::shared_ptr<IStateWriter> in_use = client.GetStateWriter().lock();
     CHECK(in_use != nullptr);
     CHECK(in_use.get() == replacement.get());
 }
@@ -328,7 +390,7 @@ void TestSetStateWriterFallsBackWhenEmpty()
 {
     Client client(MakeConfig());
 
-    client.SetStateWriter(std::weak_ptr<StateWriter>());
+    client.SetStateWriter(std::weak_ptr<IStateWriter>());
     CHECK(!client.GetStateWriter().expired());
 
     {
@@ -337,6 +399,36 @@ void TestSetStateWriterFallsBackWhenEmpty()
     }
     // The injected writer died with its scope.
     CHECK(!client.GetStateWriter().expired());
+}
+
+// A double must round-trip even when the process locale uses a decimal comma. The file is a
+// persisted format, so it has to be locale-independent: a file written under one locale must
+// read back under another.
+void TestDoubleIsLocaleIndependent()
+{
+    const char* previous = std::setlocale(LC_NUMERIC, nullptr);
+    const std::string saved = previous == nullptr ? std::string("C") : std::string(previous);
+
+    std::setlocale(LC_NUMERIC, "de_DE.UTF-8");
+    std::setlocale(LC_NUMERIC, "German_Germany.1252");
+
+    TempFile file("locale");
+    {
+        FileStateWriter writer(file.path);
+        writer.SetDouble("ratio", 0.1);
+    }
+
+    // Read back under the C locale, which is the "written on another machine" case.
+    std::setlocale(LC_NUMERIC, "C");
+
+    FileStateWriter reopened(file.path);
+    double out = 0.0;
+    const bool ok = reopened.GetDouble("ratio", out);
+
+    std::setlocale(LC_NUMERIC, saved.c_str());
+
+    CHECK(ok);
+    CHECK(out == 0.1);
 }
 
 } // namespace
@@ -356,9 +448,12 @@ int main()
     TestNewlineInValueIsSanitised();
     TestNullWriterPersistsNothing();
     TestClientHasADefaultWriter();
+    TestDefaultWriterIsLazy();
+    TestInjectedWriterMeansNoFileIo();
     TestClientUsesInjectedWriter();
     TestClientWorksWithNullWriter();
     TestSetStateWriterAtRuntime();
     TestSetStateWriterFallsBackWhenEmpty();
+    TestDoubleIsLocaleIndependent();
     return testing::Report();
 }

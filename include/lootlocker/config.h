@@ -17,7 +17,7 @@
 
 namespace lootlocker {
 
-class StateWriter;
+class IStateWriter;
 class IHttpTransport;
 class TimezoneProvider;
 
@@ -95,7 +95,7 @@ struct Config {
 
     // Optional overrides. Empty means "use the SDK default".
     std::weak_ptr<Logger>         logger;            // default writes to stderr
-    std::weak_ptr<StateWriter>    state_writer;      // default is FileStateWriter
+    std::weak_ptr<IStateWriter>    state_writer;      // default is FileStateWriter
     std::weak_ptr<IHttpTransport> transport;         // default is the libcurl one
 
     // The least-verbose level the SDK emits (D26).

@@ -15,7 +15,7 @@
 namespace lootlocker {
 
 class Client;
-class StateWriter;
+class IStateWriter;
 
 namespace core {
 class Executor;
@@ -83,16 +83,18 @@ public:
     // Replaces the state writer. The client observes it through a `weak_ptr`, so the
     // adopter keeps ownership.
     //
-    // Unlike `SetTransport`, this is allowed at any time: a state writer has no in-flight
-    // state to strand, and swapping one mid-session is a legitimate thing for a game to do
-    // when the player signs in to a platform account.
+    // Unlike `SetTransport`, this is allowed at any time, because a state writer has no
+    // in-flight state to strand. That is a property of the implementation rather than an
+    // invitation: swapping the writer mid-game is not a use case anyone has, and a game
+    // that does it will find the new writer knows nothing the old one had already stored.
+    // Set it once, before the first request.
     //
     // An empty or dead `weak_ptr` falls back to the default `FileStateWriter`.
-    void SetStateWriter(std::weak_ptr<StateWriter> writer);
+    void SetStateWriter(std::weak_ptr<IStateWriter> writer);
 
     // The state writer in use. Never empty: the client always has one, defaulting to
     // `FileStateWriter`.
-    std::weak_ptr<StateWriter> GetStateWriter() const;
+    std::weak_ptr<IStateWriter> GetStateWriter() const;
 
 private:
     // The correct form: the function is declared in `core` above, so the friend

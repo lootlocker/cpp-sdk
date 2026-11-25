@@ -26,9 +26,9 @@
 
 namespace lootlocker {
 
-class StateWriter {
+class IStateWriter {
 public:
-    virtual ~StateWriter() = default;
+    virtual ~IStateWriter() = default;
 
     // Each getter returns false and leaves `out` untouched when the key is absent or holds
     // a value of a different type. It does not convert: a key written as a string is not
@@ -60,7 +60,7 @@ public:
 // For a game that would rather re-authenticate every launch, and for a test that wants the
 // no-persistence path. It is a real implementation rather than a null pointer, so the
 // client never has to branch on whether a writer exists.
-class NullStateWriter : public StateWriter {
+class NullStateWriter : public IStateWriter {
 public:
     bool GetString(const std::string& key, std::string& out) override;
     void SetString(const std::string& key, const std::string& value) override;
@@ -92,7 +92,7 @@ public:
 // loses the file. That is acceptable for a session token — the cost is one re-authentication
 // — and the alternative (write-temp-then-rename) is not portable to every platform this SDK
 // targets. Documented rather than hidden.
-class FileStateWriter : public StateWriter {
+class FileStateWriter : public IStateWriter {
 public:
     // `path` is the file to write. Empty means the default, which is
     // `lootlocker-state.txt` in the current working directory.
