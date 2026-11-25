@@ -10,6 +10,7 @@
 #include <lootlocker/result.h>
 
 #include <memory>
+#include <string>
 
 namespace lootlocker {
 
@@ -69,6 +70,14 @@ public:
     // the client has none, which happens when curl was not built in and nothing was
     // injected.
     std::weak_ptr<IHttpTransport> GetTransport() const;
+
+    // A per-client identifier, sent as `LL-Instance-Identifier`.
+    //
+    // Generated once when the client is constructed and stable for its lifetime, so the
+    // backend can tell two clients in one process apart (D20) and a support ticket can be
+    // tied to a session. Not a security token: it identifies a client instance, nothing
+    // more.
+    const std::string& GetInstanceIdentifier() const;
 
 private:
     // The correct form: the function is declared in `core` above, so the friend

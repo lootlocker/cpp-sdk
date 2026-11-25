@@ -137,25 +137,26 @@ std::string BuildUrl(const Client& client, const typename Def::Request& request)
 // into the oldest behaviour. Pinning it makes the version the SDK targets explicit and
 // makes a future bump a one-line change here.
 //
+// `LL-SDK-Version` and `LL-Instance-Identifier` match the other SDKs, and the backend's
+// tracing middleware reads both: without them every request is attributed to "unknown" and
+// a support ticket cannot be tied to a session. The instance identifier is per-client and
+// per-process, so two clients in one process are distinguishable (D20).
+//
 // `x-session-token` is deliberately absent: there is no session yet (T14). It is added by
 // the executor once one exists, not by a definition, because it is identical for every
 // endpoint.
+//
+// `is-development` is deliberately NOT here. It is read only on the white-label login path,
+// so it belongs in that definition's `ConstructHeaders` rather than on every request.
 inline HeaderMap BuildDefaultHeaders(const Client& client)
 {
     HeaderMap headers;
 
-    const Config& config = client.GetConfig();
-
     headers.Set("LL-Version", "2021-03-01");
+    headers.Set("LL-SDK-Version", GetVersionString());
+    headers.Set("LL-Instance-Identifier", client.GetInstanceIdentifier());
     headers.Set("Accept", "application/json");
     headers.Set("User-Agent", std::string("LootLocker-Cpp-SDK/") + GetVersionString());
-
-    // The backend reads `is-development` as a header on the white-label login path, and the
-    // session body carries the same flag. Sending it only when true keeps the common case
-    // free of a header that means "false".
-    if (config.is_development) {
-        headers.Set("is-development", "true");
-    }
 
     return headers;
 }
@@ -195,19 +196,51 @@ RequestId Send(Client& client, const typename Def::Request& request,
                 return;
             }
 
+            // A 204 is the one legitimate empty success (`EndSession`), and the executor
+            // documents it as such. Parsing an empty body would report `MalformedResponse`
+            // for a request that succeeded, so it is handled before the parser sees it.
+            //
+            // `NormalizeResponse` still runs, because a definition may want to fill in
+            // derived fields on an empty response too.
+            if (completion.status_code == 204 || completion.body.empty()) {
+                typename Def::Response response;
+
+                RawResponse raw;
+                raw.status_code = completion.status_code;
+                raw.headers     = completion.headers;
+                raw.body        = completion.body;
+
+                Normalize<Def>(response, raw);
+
+                on_done(Result<typename Def::Response>::Ok(std::move(response), completion.body));
+                return;
+            }
+
             Result<JsonValue> parsed = ParseJson(completion.body);
             if (!parsed.Ok()) {
-                // A body that is not JSON at all. `ParseJson` already reports
-                // `MalformedResponse` with the parser's message, and the raw bytes are
-                // carried so the caller can see what arrived (D7, D23).
-                on_done(Result<typename Def::Response>::Fail(parsed.Error(), completion.body));
+                // A body that is not JSON at all. The parse error carries the parser's
+                // message, but the transport metadata is the executor's and must survive:
+                // `request_id` is what ties the failure to a server log line, and
+                // `status_code` is what tells the caller the request was actually answered.
+                // Only the code and message are replaced.
+                Error error = completion.error;
+                error.code        = parsed.Error().code;
+                error.message     = parsed.Error().message;
+                error.status_code = completion.status_code;
+                on_done(Result<typename Def::Response>::Fail(std::move(error), completion.body));
                 return;
             }
 
             typename Def::Response response;
             Result<Empty> decoded = DecodeJson(parsed.Value(), response);
             if (!decoded.Ok()) {
-                on_done(Result<typename Def::Response>::Fail(decoded.Error(), completion.body));
+                // Same reasoning: keep the transport metadata, replace only the decode
+                // failure.
+                Error error = completion.error;
+                error.code        = decoded.Error().code;
+                error.message     = decoded.Error().message;
+                error.status_code = completion.status_code;
+                on_done(Result<typename Def::Response>::Fail(std::move(error), completion.body));
                 return;
             }
 

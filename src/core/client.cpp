@@ -7,6 +7,8 @@
 #include "clock.h"
 #include "executor.h"
 
+#include <cstdio>
+#include <random>
 #include <utility>
 
 namespace lootlocker {
@@ -14,6 +16,10 @@ namespace lootlocker {
 struct Client::Impl {
     Config config;
     Error  config_error;
+
+    // Sent as `LL-Instance-Identifier`. Generated once, at construction, so it is stable for
+    // the client's lifetime and two clients in one process differ (D20).
+    std::string instance_identifier;
 
     // The default logger, owned here because `Config::logger` is a `weak_ptr` and the
     // default has to live somewhere. Constructed lazily: a client that never logs should
@@ -29,6 +35,32 @@ struct Client::Impl {
 };
 
 namespace {
+
+// A random identifier for `LL-Instance-Identifier`.
+//
+// Not a security token, so `std::random_device` is the right tool rather than a
+// cryptographic generator: it only has to be unlikely to collide between two clients in one
+// process. Formatted as a UUID-shaped string because that is what the other SDKs send and
+// what the backend's tracing expects to log.
+std::string MakeInstanceIdentifier()
+{
+    std::random_device device;
+    std::uint64_t high = (static_cast<std::uint64_t>(device()) << 32) ^ device();
+    std::uint64_t low  = (static_cast<std::uint64_t>(device()) << 32) ^ device();
+
+    // Version 4, variant 1, so it reads as a UUID rather than as arbitrary hex.
+    high = (high & 0xFFFFFFFFFFFF0FFFULL) | 0x0000000000004000ULL;
+    low  = (low & 0x3FFFFFFFFFFFFFFFULL) | 0x8000000000000000ULL;
+
+    char buffer[37];
+    std::snprintf(buffer, sizeof(buffer), "%08x-%04x-%04x-%04x-%012llx",
+                  static_cast<unsigned>((high >> 32) & 0xFFFFFFFFULL),
+                  static_cast<unsigned>((high >> 16) & 0xFFFFULL),
+                  static_cast<unsigned>(high & 0xFFFFULL),
+                  static_cast<unsigned>((low >> 48) & 0xFFFFULL),
+                  static_cast<unsigned long long>(low & 0xFFFFFFFFFFFFULL));
+    return std::string(buffer);
+}
 
 // The logger the client will use: the injected one if it is alive, otherwise the default.
 std::weak_ptr<Logger> ResolveLogger(const Config& config, std::shared_ptr<Logger>& owned)
@@ -48,6 +80,7 @@ Client::Client(const Config& config) : m_impl(new Impl())
 {
     m_impl->config = config;
     m_impl->config_error = ValidateConfig(config);
+    m_impl->instance_identifier = MakeInstanceIdentifier();
 
     // A bad config leaves the client inert rather than half-built. The executor is still
     // constructed so `Update()` and `Submit` behave predictably, but nothing is ever sent
@@ -127,6 +160,11 @@ bool Client::SetTransport(std::weak_ptr<IHttpTransport> transport)
 std::weak_ptr<IHttpTransport> Client::GetTransport() const
 {
     return m_impl->executor->GetTransport();
+}
+
+const std::string& Client::GetInstanceIdentifier() const
+{
+    return m_impl->instance_identifier;
 }
 
 namespace core {

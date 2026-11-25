@@ -21,6 +21,7 @@
 
 #include "test_harness.h"
 
+#include <clocale>
 #include <memory>
 #include <string>
 #include <vector>
@@ -65,6 +66,25 @@ Result<Empty> from_json(const JsonValue& j, ListBroadcastsResponse& out)
     out.broadcasts.clear();
     for (std::size_t i = 0; i < list.Size(); ++i) {
         const JsonValue item = list.At(i);
+
+        // Each field is validated, not just the array. `AsString()` on a missing or
+        // non-string value returns an empty string, so assigning it unchecked would turn
+        // "the server did not send this" into "the server sent an empty string" - the
+        // silent default D23 exists to prevent. A decoder that skipped this would make the
+        // generic layer look correct while proving nothing.
+        if (item["id"].GetKind() != JsonValue::Kind::String) {
+            Error e;
+            e.code    = ErrorCode::MalformedResponse;
+            e.message = "a broadcast is missing a string id";
+            return Result<Empty>::Fail(e);
+        }
+        if (item["message"].GetKind() != JsonValue::Kind::String) {
+            Error e;
+            e.code    = ErrorCode::MalformedResponse;
+            e.message = "a broadcast is missing a string message";
+            return Result<Empty>::Fail(e);
+        }
+
         Broadcast b;
         b.id      = item["id"].AsString();
         b.message = item["message"].AsString();
@@ -588,6 +608,180 @@ void TestBuilderInvalidUtf8DoesNotAbort()
     CHECK(out.find("byte\"") != std::string::npos);
 }
 
+// A 204 is the one legitimate empty success (`EndSession`). Parsing an empty body would
+// report `MalformedResponse` for a request that succeeded.
+void TestNoContentIsSuccess()
+{
+    Fixture f;
+
+    ListBroadcastsRequest request;
+    request.limit = 1;
+
+    bool      called = false;
+    bool      ok     = false;
+    ErrorCode code   = ErrorCode::None;
+
+    lootlocker::core::Send<ListBroadcastsDef>(
+        *f.client, request, [&](Result<ListBroadcastsResponse> result) {
+            called = true;
+            ok     = result.Ok();
+            if (!result.Ok()) {
+                code = result.Error().code;
+            }
+        });
+
+    f.client->Update();
+    f.transport->Complete(f.transport->Order().front(), 204, "");
+    f.client->Update();
+
+    CHECK(called);
+    CHECK(ok);
+    CHECK(code == ErrorCode::None);
+}
+
+// A malformed body must keep the transport metadata: `request_id` is what ties the failure
+// to a server log line, and `status_code` says the request was actually answered.
+void TestMalformedBodyKeepsRequestMetadata()
+{
+    Fixture f;
+
+    ListBroadcastsRequest request;
+    request.limit = 1;
+
+    std::string request_id;
+    int         status = 0;
+    ErrorCode   code   = ErrorCode::None;
+
+    lootlocker::core::Send<ListBroadcastsDef>(
+        *f.client, request, [&](Result<ListBroadcastsResponse> result) {
+            if (!result.Ok()) {
+                request_id = result.Error().request_id;
+                status     = result.Error().status_code;
+                code       = result.Error().code;
+            }
+        });
+
+    f.client->Update();
+    f.transport->Complete(f.transport->Order().front(), 200, "not json");
+    f.client->Update();
+
+    CHECK(code == ErrorCode::MalformedResponse);
+    CHECK_EQ_INT(status, 200);
+    CHECK(!request_id.empty());
+}
+
+// A malformed nested item is an error, not an empty string. Without this the decoder would
+// silently default a field and the generic layer would look correct while proving nothing.
+void TestMalformedNestedItem()
+{
+    Fixture f;
+
+    ListBroadcastsRequest request;
+    request.limit = 1;
+
+    bool      called = false;
+    ErrorCode code   = ErrorCode::None;
+
+    lootlocker::core::Send<ListBroadcastsDef>(
+        *f.client, request, [&](Result<ListBroadcastsResponse> result) {
+            called = true;
+            if (!result.Ok()) {
+                code = result.Error().code;
+            }
+        });
+
+    f.client->Update();
+    f.transport->Complete(f.transport->Order().front(), 200,
+                          R"({"broadcasts":[{"id":"a"}]})");
+    f.client->Update();
+
+    CHECK(called);
+    CHECK(code == ErrorCode::MalformedResponse);
+}
+
+// The SDK version and instance identifier headers the other SDKs send, and which the
+// backend's tracing middleware reads.
+void TestSdkAndInstanceHeaders()
+{
+    Fixture f;
+
+    ListBroadcastsRequest request;
+    request.limit = 1;
+
+    lootlocker::core::Send<ListBroadcastsDef>(*f.client, request,
+                                              [](Result<ListBroadcastsResponse>) {});
+    f.client->Update();
+
+    const IHttpTransport::Request* sent = f.Sent();
+    CHECK(sent != nullptr);
+    if (sent == nullptr) {
+        return;
+    }
+
+    std::string value;
+    CHECK(sent->headers.Get("LL-SDK-Version", value));
+    CHECK(!value.empty());
+
+    CHECK(sent->headers.Get("LL-Instance-Identifier", value));
+    CHECK_EQ_INT(static_cast<long long>(value.size()), 36);   // UUID-shaped
+
+    // Stable for the client's lifetime, and different between clients.
+    CHECK_EQ(value, f.client->GetInstanceIdentifier());
+
+    Fixture other;
+    CHECK(other.client->GetInstanceIdentifier() != f.client->GetInstanceIdentifier());
+}
+
+// `is-development` is read only on the white-label login path, so it is not a default
+// header.
+void TestIsDevelopmentIsNotADefaultHeader()
+{
+    Fixture f;
+
+    ListBroadcastsRequest request;
+    request.limit = 1;
+
+    lootlocker::core::Send<ListBroadcastsDef>(*f.client, request,
+                                              [](Result<ListBroadcastsResponse>) {});
+    f.client->Update();
+
+    const IHttpTransport::Request* sent = f.Sent();
+    CHECK(sent != nullptr);
+    if (sent == nullptr) {
+        return;
+    }
+    CHECK(!sent->headers.Has("is-development"));
+}
+
+// A `uint64` query parameter must be accepted without a narrowing cast, and must not wrap.
+void TestQueryParameterUnsigned()
+{
+    lootlocker::core::QueryParameters query;
+    query.Add("id", static_cast<std::uint64_t>(18446744073709551615ULL));
+    CHECK_EQ(query.ToQueryString(), "id=18446744073709551615");
+}
+
+// The double formatter must not emit a locale's decimal comma. The test forces a comma
+// locale, which is the only way to prove the normalisation actually runs.
+void TestQueryParameterDoubleIsLocaleIndependent()
+{
+    const char* previous = std::setlocale(LC_NUMERIC, nullptr);
+    const std::string saved = previous == nullptr ? std::string("C") : std::string(previous);
+
+    // A comma-decimal locale. Not every platform has every locale, so a failure to set one
+    // is not a test failure - the assertion below still holds under "C".
+    std::setlocale(LC_NUMERIC, "de_DE.UTF-8");
+    std::setlocale(LC_NUMERIC, "German_Germany.1252");
+
+    lootlocker::core::QueryParameters query;
+    query.Add("ratio", 1.5);
+    const std::string encoded = query.ToQueryString();
+
+    std::setlocale(LC_NUMERIC, saved.c_str());
+
+    CHECK_EQ(encoded, "ratio=1.5");
+}
+
 } // namespace
 
 int main()
@@ -610,5 +804,12 @@ int main()
     TestBuilderUnsigned();
     TestBuilderNullPointer();
     TestBuilderInvalidUtf8DoesNotAbort();
+    TestNoContentIsSuccess();
+    TestMalformedBodyKeepsRequestMetadata();
+    TestMalformedNestedItem();
+    TestSdkAndInstanceHeaders();
+    TestIsDevelopmentIsNotADefaultHeader();
+    TestQueryParameterUnsigned();
+    TestQueryParameterDoubleIsLocaleIndependent();
     return testing::Report();
 }
