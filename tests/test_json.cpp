@@ -221,7 +221,58 @@ void TestSerializeRoundTripsScalarsAndArrays()
     CHECK_EQ(core::SerializeJson(Parse("null")), std::string("null"));
     CHECK_EQ(core::SerializeJson(Parse("true")), std::string("true"));
     CHECK_EQ(core::SerializeJson(Parse("\"text\"")), std::string("\"text\""));
-    CHECK_EQ(core::SerializeJson(Parse("[1,2,3]")), std::string("[1.0,2.0,3.0]"));
+
+    // Integers stay integers. The old expectation here was "[1.0,2.0,3.0]", which was the
+    // bug: every number went through `AsDouble()`.
+    CHECK_EQ(core::SerializeJson(Parse("[1,2,3]")), std::string("[1,2,3]"));
+    CHECK_EQ(core::SerializeJson(Parse("[1.5,2.5]")), std::string("[1.5,2.5]"));
+}
+
+void TestOutOfRangeFloatsSaturate()
+{
+    // `1e100` is valid JSON and does not fit an integer. Converting an out-of-range `double`
+    // to an integer is undefined behaviour rather than a clamp, so the range is checked
+    // before the cast and the result is defined as the saturated bound.
+    const JsonValue root = Parse("{\"huge\":1e100,\"neg\":-1e100,\"nan\":1e100}");
+
+    CHECK(root["huge"].AsInt64() == 9223372036854775807LL);
+    CHECK(root["huge"].AsUInt64() == 18446744073709551615ULL);
+    CHECK(root["neg"].AsInt64() == -9223372036854775807LL - 1);
+    CHECK(root["neg"].AsUInt64() == 0ULL);
+}
+
+void TestSizeIsArraysOnly()
+{
+    // The contract says arrays only. An object reporting its member count would make a
+    // caller treat it as an array-sized value, and `At()` on an object returns invalid - so
+    // the two would disagree.
+    const JsonValue root = Parse("{\"arr\":[1,2,3],\"obj\":{\"a\":1,\"b\":2}}");
+
+    CHECK_EQ_INT(static_cast<long long>(root["arr"].Size()), 3);
+    CHECK_EQ_INT(static_cast<long long>(root["obj"].Size()), 0);
+    CHECK(!root["obj"].At(0).IsValid());
+}
+
+void TestSerializePreservesIntegerPrecision()
+{
+    // Routing every number through `AsDouble()` turned 9007199254740993 into
+    // 9007199254740992 - silently changing valid JSON data.
+    CHECK_EQ(core::SerializeJson(Parse("9007199254740993")), std::string("9007199254740993"));
+    CHECK_EQ(core::SerializeJson(Parse("18446744073709551615")),
+             std::string("18446744073709551615"));
+    CHECK_EQ(core::SerializeJson(Parse("-9223372036854775808")),
+             std::string("-9223372036854775808"));
+}
+
+void TestSerializeHandlesObjectsAndNesting()
+{
+    // An object inside an array used to serialise to an empty string, which the non-throwing
+    // parse turned into a discarded value - and `dump()` on a discarded value aborts under
+    // `JSON_NOEXCEPTION`.
+    CHECK_EQ(core::SerializeJson(Parse("{\"a\":1}")), std::string("{\"a\":1}"));
+    CHECK_EQ(core::SerializeJson(Parse("[{\"a\":1},2]")), std::string("[{\"a\":1},2]"));
+    CHECK_EQ(core::SerializeJson(Parse("{\"outer\":{\"inner\":[1,2]}}")),
+             std::string("{\"outer\":{\"inner\":[1,2]}}"));
 }
 
 void TestSerializeOfInvalidIsEmpty()
@@ -248,6 +299,10 @@ int main()
     TestMalformedBodiesAreErrors();
     TestValidJsonOfTheWrongShapeParses();
     TestSerializeRoundTripsScalarsAndArrays();
+    TestOutOfRangeFloatsSaturate();
+    TestSizeIsArraysOnly();
+    TestSerializePreservesIntegerPrecision();
+    TestSerializeHandlesObjectsAndNesting();
     TestSerializeOfInvalidIsEmpty();
 
     return testing::Report();

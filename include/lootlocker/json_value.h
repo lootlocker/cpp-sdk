@@ -26,8 +26,10 @@ class JsonValue;
 namespace core {
 class JsonParser;
 
-// Declared here so the friend declaration below can name it. Defined in `src/core/json.cpp`.
+// Declared here so the friend declarations below can name them. Defined in
+// `src/core/json.cpp`.
 Result<JsonValue> ParseJson(const std::string& text);
+std::string       SerializeJson(const JsonValue& value);
 } // namespace core
 
 class JsonValue {
@@ -76,6 +78,10 @@ private:
     // friend function rather than widening the constructor, so nothing else can mint a
     // `JsonValue` from an impl.
     friend Result<JsonValue> core::ParseJson(const std::string& text);
+
+    // `SerializeJson` resolves the document directly rather than rebuilding through the
+    // public surface, which would lose integer precision and could not represent an object.
+    friend std::string core::SerializeJson(const JsonValue& value);
 
     struct Impl;
 
