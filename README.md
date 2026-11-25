@@ -251,7 +251,19 @@ lootlocker::Result<lootlocker::Empty> from_json(const lootlocker::JsonValue& j,
         return lootlocker::Result<lootlocker::Empty>::Fail(e);
     }
     out.total_score = j["total_score"].AsUInt64();
-    out.rank        = j["rank"].AsString();
+
+    // Every field is validated, not just the numeric one. `AsString()` on a missing or
+    // non-string value returns an empty string, so assigning it unchecked would turn "the
+    // server did not send this" into "the server sent an empty string" — the silent default
+    // the error model exists to prevent.
+    if (j["rank"].GetKind() != lootlocker::JsonValue::Kind::String) {
+        lootlocker::Error e;
+        e.code    = lootlocker::ErrorCode::MalformedResponse;
+        e.message = "rank is missing or not a string";
+        return lootlocker::Result<lootlocker::Empty>::Fail(e);
+    }
+    out.rank = j["rank"].AsString();
+
     return lootlocker::Result<lootlocker::Empty>::Ok(lootlocker::Empty());
 }
 

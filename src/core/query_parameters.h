@@ -29,6 +29,12 @@ public:
 
     void Add(const std::string& name, int value);
     void Add(const std::string& name, std::int64_t value);
+
+    // A `uint64` needs its own overload. Without it the call is ambiguous between
+    // `std::int64_t` and `bool` on the usual platforms, so a definition could not add an
+    // unsigned wire id at all - and the SDK's ids are `uint64` end to end.
+    void Add(const std::string& name, std::uint64_t value);
+
     void Add(const std::string& name, double value);
     void Add(const std::string& name, bool value);
 
