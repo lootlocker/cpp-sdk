@@ -275,6 +275,27 @@ void TestSerializeHandlesObjectsAndNesting()
              std::string("{\"outer\":{\"inner\":[1,2]}}"));
 }
 
+void TestNumberGranularityIsExposed()
+{
+    // A custom serialiser needs the same distinction the SDK's own decoders make: a `uint64`
+    // field must not be read through `AsDouble()`, which loses precision above 2^53.
+    const JsonValue root = Parse("{\"i\":-7,\"u\":18446744073709551615,\"d\":1.5,\"s\":\"x\"}");
+
+    CHECK(root["i"].IsInteger());
+    CHECK(!root["i"].IsUnsigned());
+
+    CHECK(root["u"].IsInteger());
+    CHECK(root["u"].IsUnsigned());
+
+    // A float is a number but not an integer, which is the distinction that matters.
+    CHECK(!root["d"].IsInteger());
+    CHECK(!root["d"].IsUnsigned());
+
+    // And neither is true for a non-number.
+    CHECK(!root["s"].IsInteger());
+    CHECK(!root["s"].IsUnsigned());
+}
+
 void TestSerializeOfInvalidIsEmpty()
 {
     CHECK_EQ(core::SerializeJson(JsonValue()), std::string());
@@ -303,6 +324,7 @@ int main()
     TestSizeIsArraysOnly();
     TestSerializePreservesIntegerPrecision();
     TestSerializeHandlesObjectsAndNesting();
+    TestNumberGranularityIsExposed();
     TestSerializeOfInvalidIsEmpty();
 
     return testing::Report();

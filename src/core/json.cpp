@@ -203,6 +203,23 @@ std::string JsonValue::AsString() const
     return Resolve(*m_impl->document, m_impl->path)->get<std::string>();
 }
 
+bool JsonValue::IsInteger() const
+{
+    if (GetKind() != Kind::Number) {
+        return false;
+    }
+    const nlohmann::json* value = Resolve(*m_impl->document, m_impl->path);
+    return value->is_number_integer() || value->is_number_unsigned();
+}
+
+bool JsonValue::IsUnsigned() const
+{
+    if (GetKind() != Kind::Number) {
+        return false;
+    }
+    return Resolve(*m_impl->document, m_impl->path)->is_number_unsigned();
+}
+
 JsonValue JsonValue::operator[](const std::string& key) const
 {
     if (GetKind() != Kind::Object) {
