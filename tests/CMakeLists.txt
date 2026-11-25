@@ -67,6 +67,14 @@ target_link_libraries(test_json PRIVATE LootLocker::core lootlocker_compile_opti
 target_include_directories(test_json PRIVATE ${CMAKE_SOURCE_DIR}/src/core)
 add_test(NAME json COMMAND test_json)
 
+# The endpoint definition layer (T13). `src/core` is on the include path because the
+# definition type and `Send<Definition>()` are internal (D18) - an adopter reaches them
+# through a module's typed wrapper, not directly.
+add_executable(test_definition test_definition.cpp)
+target_link_libraries(test_definition PRIVATE LootLocker::core lootlocker_compile_options)
+target_include_directories(test_definition PRIVATE ${CMAKE_SOURCE_DIR}/src/core)
+add_test(NAME definition COMMAND test_definition)
+
 # The end-to-end transport test (T11, owner 2026-11-13): a real round trip through the real
 # curl transport against a loopback server, plus the proof that `Config::transport` is
 # actually consulted.

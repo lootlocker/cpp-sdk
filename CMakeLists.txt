@@ -142,6 +142,7 @@ add_library(lootlocker_core STATIC
     src/core/request_id.cpp
     src/core/rate_limiter.cpp
     src/core/json.cpp
+    src/core/query_parameters.cpp
     src/core/executor.cpp
     src/core/client.cpp
 )
