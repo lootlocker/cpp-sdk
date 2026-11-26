@@ -222,6 +222,11 @@ template <typename Def>
 RequestId Send(Client& client, const typename Def::Request& request,
                ResponseCallback<Def> on_done)
 {
+    // Instantiate the contract checks. Without this the `static_assert`s in
+    // `DefinitionTraits` are never evaluated, so a definition missing `kMethod` fails later
+    // in an unrelated template expression instead of producing the promised diagnostic.
+    static_assert(sizeof(DefinitionTraits<Def>) > 0, "the definition is incomplete");
+
     PendingRequest pending;
     pending.method  = Def::kMethod;
     pending.url     = BuildUrl<Def>(client, request);
@@ -252,26 +257,32 @@ RequestId Send(Client& client, const typename Def::Request& request,
             // documents it as such. Parsing an empty body would report `MalformedResponse`
             // for a request that succeeded, so it is handled before the parser sees it.
             //
-            // A definition whose response carries required fields opts out with
-            // `kAllowEmptyResponse = false`, because for it an empty body is a malformed
-            // response rather than a success - a 200 with no body must not become an
-            // all-default value that looks valid.
+            // **Both the 204 and the empty-body case are gated on the definition's flag.**
+            // Gating only the empty-body case left a hole: a 204 from an endpoint whose
+            // response carries required fields would still become an all-default value that
+            // looks valid. A definition that cannot be empty says so, and that applies to
+            // every empty response, not just a 200.
             //
             // `NormalizeResponse` still runs, because a definition may want to fill in
             // derived fields on an empty response too.
-            if (completion.status_code == 204 ||
-                (completion.body.empty() && AllowsEmptyResponse<Def>::value)) {
-                typename Def::Response response;
+            // `if constexpr` rather than a runtime `if`, so the constant condition does not
+            // trip MSVC's C4127 and the branch is genuinely compiled out for a definition
+            // that cannot be empty.
+            if constexpr (AllowsEmptyResponse<Def>::value) {
+                if (completion.status_code == 204 || completion.body.empty()) {
+                    typename Def::Response response;
 
-                RawResponse raw;
-                raw.status_code = completion.status_code;
-                raw.headers     = completion.headers;
-                raw.body        = completion.body;
+                    RawResponse raw;
+                    raw.status_code = completion.status_code;
+                    raw.headers     = completion.headers;
+                    raw.body        = completion.body;
 
-                Normalize<Def>(response, raw);
+                    Normalize<Def>(response, raw);
 
-                on_done(Result<typename Def::Response>::Ok(std::move(response), completion.body));
-                return;
+                    on_done(Result<typename Def::Response>::Ok(std::move(response),
+                                                               completion.body));
+                    return;
+                }
             }
 
             Result<JsonValue> parsed = ParseJson(completion.body);
