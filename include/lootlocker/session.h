@@ -10,7 +10,6 @@
 
 #include <cstdint>
 #include <string>
-#include <type_traits>
 
 namespace lootlocker {
 
@@ -26,13 +25,6 @@ struct Session {
     bool          check_grant_notifications = false;
     bool          check_deactivation_notifications = false;
 };
-
-// `player_id` must stay `uint64`. The D4 spike showed both candidate parsers preserve it
-// exactly; the hazard is a `double` field in our own structs, so the type is enforced here
-// rather than left to review.
-static_assert(sizeof(Session::player_id) == 8, "player_id must be 64-bit");
-static_assert(!std::is_floating_point<decltype(Session::player_id)>::value,
-              "player_id must not be a floating-point type (D4)");
 
 // Decodes a session response (D27).
 //

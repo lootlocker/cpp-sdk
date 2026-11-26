@@ -529,8 +529,9 @@ bool Executor::Update()
             //
             // Set here rather than by a definition, because it is identical for every
             // endpoint and a definition that forgot it would produce a 401 that looks like
-            // an auth bug.
-            if (m_session_token) {
+            // an auth bug. A definition that is itself an authentication request opts out,
+            // because an authentication request is not an authenticated request.
+            if (entry.request.requires_session && m_session_token) {
                 const std::string token = m_session_token();
                 if (!token.empty()) {
                     request.headers.Set("x-session-token", token);

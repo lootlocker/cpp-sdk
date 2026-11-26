@@ -323,6 +323,94 @@ std::string SerializeJson(const JsonValue& value)
 } // namespace lootlocker
 
 // ---------------------------------------------------------------------------
+// Shared field readers (T14 review)
+// ---------------------------------------------------------------------------
+//
+// In this translation unit because they are JSON-layer concerns, not per-type ones. Every
+// decoder needs the same three questions answered, and writing them per type is how two
+// decoders end up disagreeing about whether a null counts as absent.
+
+namespace lootlocker {
+namespace core {
+
+Error MissingField(const char* field)
+{
+    Error e;
+    e.code    = ErrorCode::MalformedResponse;
+    e.message = std::string("the response is missing ") + field;
+    return e;
+}
+
+Error WrongFieldType(const char* field, const char* expected)
+{
+    Error e;
+    e.code    = ErrorCode::MalformedResponse;
+    e.message = std::string("the response has a non-") + expected + " " + field;
+    return e;
+}
+
+bool ReadRequiredString(const JsonValue& j, const char* key, std::string& out, Error& error)
+{
+    const JsonValue value = j[key];
+    if (value.GetKind() == JsonValue::Kind::Invalid || value.GetKind() == JsonValue::Kind::Null) {
+        error = MissingField(key);
+        return false;
+    }
+    if (value.GetKind() != JsonValue::Kind::String) {
+        error = WrongFieldType(key, "string");
+        return false;
+    }
+    out = value.AsString();
+    return true;
+}
+
+bool ReadRequiredUInt64(const JsonValue& j, const char* key, std::uint64_t& out, Error& error)
+{
+    const JsonValue value = j[key];
+    if (value.GetKind() == JsonValue::Kind::Invalid || value.GetKind() == JsonValue::Kind::Null) {
+        error = MissingField(key);
+        return false;
+    }
+    if (!value.IsUnsigned()) {
+        error = WrongFieldType(key, "unsigned integer");
+        return false;
+    }
+    out = value.AsUInt64();
+    return true;
+}
+
+bool ReadOptionalString(const JsonValue& j, const char* key, std::string& out, Error& error)
+{
+    const JsonValue value = j[key];
+    if (value.GetKind() == JsonValue::Kind::Invalid || value.GetKind() == JsonValue::Kind::Null) {
+        return true;
+    }
+    if (value.GetKind() != JsonValue::Kind::String) {
+        error = WrongFieldType(key, "string");
+        return false;
+    }
+    out = value.AsString();
+    return true;
+}
+
+bool ReadOptionalBool(const JsonValue& j, const char* key, bool& out, Error& error)
+{
+    const JsonValue value = j[key];
+    if (value.GetKind() == JsonValue::Kind::Invalid || value.GetKind() == JsonValue::Kind::Null) {
+        return true;
+    }
+    if (value.GetKind() != JsonValue::Kind::Bool) {
+        error = WrongFieldType(key, "boolean");
+        return false;
+    }
+    out = value.AsBool();
+    return true;
+}
+
+} // namespace core
+} // namespace lootlocker
+
+// ---------------------------------------------------------------------------
 // JsonBuilder (T13d)
 // ---------------------------------------------------------------------------
 //

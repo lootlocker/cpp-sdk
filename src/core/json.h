@@ -11,6 +11,7 @@
 #include <lootlocker/json_value.h>
 #include <lootlocker/result.h>
 
+#include <cstdint>
 #include <string>
 
 namespace lootlocker {
@@ -46,6 +47,36 @@ Result<Empty> DecodeJson(const JsonValue& value, T& out)
 {
     return from_json(value, out);
 }
+
+// --- shared field readers --------------------------------------------------
+//
+// Every decoder needs the same three questions answered: "is this required field present and
+// the right type", "is this optional field present and the right type", and "what do I say
+// when it is not". Writing them per type is how two decoders end up disagreeing about
+// whether a null counts as absent.
+//
+// The distinction they encode is D23's: a *missing* required field is an error, a *present
+// field of the wrong type* is a different error, and an absent optional field is not an
+// error at all.
+
+// A required string. Absent, null and non-string are all failures.
+bool ReadRequiredString(const JsonValue& j, const char* key, std::string& out, Error& error);
+
+// A required unsigned integer. Read through `IsUnsigned`/`AsUInt64` so a value above 2^53
+// survives (D4).
+bool ReadRequiredUInt64(const JsonValue& j, const char* key, std::uint64_t& out, Error& error);
+
+// An optional string. Absent or null leaves `out` untouched; a present non-string is an
+// error, because that is a shape the API does not send and ignoring it would hide a contract
+// change.
+bool ReadOptionalString(const JsonValue& j, const char* key, std::string& out, Error& error);
+
+bool ReadOptionalBool(const JsonValue& j, const char* key, bool& out, Error& error);
+
+// The two error constructors the readers use, exposed so a decoder can report the same way
+// for a field the readers do not cover.
+Error MissingField(const char* field);
+Error WrongFieldType(const char* field, const char* expected);
 
 } // namespace core
 } // namespace lootlocker

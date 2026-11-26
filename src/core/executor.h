@@ -40,6 +40,10 @@ struct PendingRequest {
     std::string url;
     HeaderMap   headers;
     std::string body;
+
+    // Whether the executor should attach `x-session-token` when it sends this. False for an
+    // authentication request, which is not an authenticated request by definition.
+    bool requires_session = true;
 };
 
 // The outcome of one request, delivered exactly once.
