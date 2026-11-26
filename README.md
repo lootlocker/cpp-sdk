@@ -347,26 +347,37 @@ while (ll.Update()) {
 }
 ```
 
-**The identifier reuse is the whole point.** A guest who loses their `player_identifier`
-silently becomes a new account with no inventory, so the SDK persists it and sends it back
-on the next launch. You do not have to do anything: the resolved identifier is written
-*before* the request is sent, so a crash between sending and receiving does not orphan the
-account the server just created.
+**The identifier reuse is the whole point.** A guest who loses their identifier silently
+becomes a new account with no inventory, so the SDK persists it and sends it back on the next
+launch. You do not have to do anything: the resolved identifier is written *before* the
+request is sent, so a crash between sending and receiving does not orphan the account the
+server just created.
 
-The resolution order is: `GuestSessionOptions::player_identifier` if you set it, then the
+The resolution order is: `GuestSessionInputs::guest_identifier` if you set it, then the
 persisted one, then a newly generated one. Setting it explicitly is for a game that manages
-its own identity; leaving it empty is what almost every caller wants.
+its own identity; leaving it unset is what almost every caller wants.
 
 A successful session is stored on the client, so subsequent requests carry
 `x-session-token` and `ll.GetSession()` returns it. `ll.HasSession()` is the cheap check.
+**The token is never sent on an authentication request** — an authentication request is not
+an authenticated request by definition.
 
 ```cpp
-lootlocker::GuestSessionOptions opts;
-opts.timezone    = "Europe/Stockholm";   // empty = resolve: provider, then OS, then Etc/UTC
-opts.player_name = "Erik";
+lootlocker::GuestSessionInputs inputs;
 
-lootlocker::auth::StartGuestSession(ll, opts, on_session);
+lootlocker::SessionOptionals optionals;
+optionals.timezone    = "Europe/Stockholm";   // empty = resolve: provider, then OS, then Etc/UTC
+optionals.player_name = "Erik";
+optionals.check_dlc   = true;
+
+inputs.optionals = optionals;
+
+lootlocker::auth::StartGuestSession(ll, inputs, on_session);
 ```
+
+`SessionOptionals` is the backend's `optionals` object verbatim — `timezone`, `player_name`,
+`auto_create_profile`, `check_dlc`, `referral_code`, `referral_program_key`. A field equal to
+the backend's default is omitted rather than sent.
 
 With a `NullStateWriter` every launch generates a new identifier, which is the documented
 cost of choosing not to persist.

@@ -161,6 +161,19 @@ inline HeaderMap BuildDefaultHeaders(const Client& client)
     return headers;
 }
 
+// Whether a definition's request should carry `x-session-token`.
+//
+// True by default, because most requests are authenticated. A definition opts out with
+// `static constexpr bool kRequiresSession = false;` - which an authentication request must,
+// because an authentication request is not an authenticated request by definition, and a
+// stale token from a previous session has no business being sent to it.
+template <typename Def, typename = void>
+struct RequiresSession : std::true_type {};
+
+template <typename Def>
+struct RequiresSession<Def, decltype(void(Def::kRequiresSession))>
+    : std::integral_constant<bool, Def::kRequiresSession> {};
+
 // Whether a definition's response type can legitimately be empty.
 //
 // The generic `Send` treats an empty body as success, because a 204 is the one legitimate
@@ -174,6 +187,26 @@ struct AllowsEmptyResponse : std::true_type {};
 template <typename Def>
 struct AllowsEmptyResponse<Def, decltype(void(Def::kAllowEmptyResponse))>
     : std::integral_constant<bool, Def::kAllowEmptyResponse> {};
+
+// What a definition must provide, checked at compile time.
+//
+// Without this a missing member is a template error inside `Send`, which names a line in
+// `definition.h` rather than the definition that is wrong. The asserts turn that into a
+// message that says what is missing and where.
+//
+// This is the answer to "should there be an interface for definitions": the enforcement is
+// real, and it costs no vtable and no base class.
+template <typename Def>
+struct DefinitionTraits {
+    static_assert(std::is_convertible<decltype(Def::kMethod), const char*>::value,
+                  "a definition must provide `static constexpr const char* kMethod`");
+    static_assert(std::is_convertible<decltype(Def::kPath), const char*>::value,
+                  "a definition must provide `static constexpr const char* kPath`");
+    static_assert(std::is_class<typename Def::Request>::value,
+                  "a definition must provide `using Request = ...`");
+    static_assert(std::is_class<typename Def::Response>::value,
+                  "a definition must provide `using Response = ...`");
+};
 
 // Sends one request described by `Def` and delivers the decoded response to `on_done`.
 //
@@ -194,6 +227,11 @@ RequestId Send(Client& client, const typename Def::Request& request,
     pending.url     = BuildUrl<Def>(client, request);
     pending.headers = BuildDefaultHeaders(client);
     pending.body    = BuildBody(request);
+
+    // The definition says whether this request is authenticated. An authentication request
+    // is not, so it must not carry a token - and a stale one from a previous session has no
+    // business being sent to it.
+    pending.requires_session = RequiresSession<Def>::value;
 
     if (!pending.body.empty()) {
         pending.headers.Set("Content-Type", "application/json");
