@@ -85,36 +85,21 @@ std::string ResolveGuestIdentifier(Client& ll, const GuestSessionInputs& inputs)
 
 // The timezone to send, or empty for "send none".
 //
-// Resolution order, per D26: the caller's option, then `Config::timezone`, then the injected
-// `TimezoneProvider`, then the OS, then `Etc/UTC`. `Config::send_timezone == false` means
-// send nothing at all, which is a different statement from "I have no opinion".
+// **Delegates to the public `ResolveTimezone` helper** rather than reimplementing the chain.
+// The first version did reimplement it and skipped the OS step, so a normal guest start
+// ignored the machine timezone entirely - which is the bug the helper exists to prevent.
 //
-// The result is normalised to an IANA name, because a Windows name sent as-is gets UTC
-// server-side and puts every local-day boundary on the wrong day (R27).
-std::string ResolveTimezone(Client& ll, const SessionOptionals& optionals)
+// The caller's option wins over `Config::timezone`, because a per-call value is more
+// specific than a per-client one.
+std::string ResolveSessionTimezone(Client& ll, const SessionOptionals& optionals)
 {
     const Config& config = ll.GetConfig();
-    if (!config.send_timezone) {
-        return std::string();
-    }
 
-    std::string candidate = optionals.timezone;
-    if (candidate.empty()) {
-        candidate = config.timezone;
-    }
-    if (candidate.empty()) {
-        if (std::shared_ptr<TimezoneProvider> provider = config.timezone_provider.lock()) {
-            candidate = provider->GetTimezone();
-        }
-    }
+    const std::string& override_value =
+        optionals.timezone.empty() ? config.timezone : optionals.timezone;
 
-    std::string iana;
-    if (TryNormalizeToIana(candidate, iana)) {
-        return iana;
-    }
-    // `TryNormalizeToIana` sets the default on failure, so this is the documented fallback
-    // rather than an empty string the server would read as UTC.
-    return std::string(kDefaultIanaTimezone);
+    return ResolveTimezone(config.timezone_provider.lock().get(), override_value,
+                           config.send_timezone);
 }
 
 // The backend's `optionals` object, serialised only when it carries something.
@@ -230,7 +215,7 @@ RequestId StartGuestSession(Client& ll, const GuestSessionInputs& inputs,
     if (inputs.optionals.has_value()) {
         const SessionOptionals& in = *inputs.optionals;
 
-        request.optionals.timezone             = ResolveTimezone(ll, in);
+        request.optionals.timezone             = ResolveSessionTimezone(ll, in);
         request.optionals.player_name          = in.player_name;
         request.optionals.auto_create_profile  = in.auto_create_profile;
         request.optionals.check_dlc            = in.check_dlc;
@@ -247,7 +232,7 @@ RequestId StartGuestSession(Client& ll, const GuestSessionInputs& inputs,
         // No optionals supplied, but the timezone is still resolved: it is a config-level
         // concern rather than a per-call one, and a game that set `Config::timezone` expects
         // it to be sent.
-        request.optionals.timezone = ResolveTimezone(ll, SessionOptionals());
+        request.optionals.timezone = ResolveSessionTimezone(ll, SessionOptionals());
         request.has_optionals      = !request.optionals.timezone.empty();
     }
 

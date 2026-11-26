@@ -12,6 +12,7 @@
 #include <lootlocker/result.h>
 #include <lootlocker/session.h>
 #include <lootlocker/state_writer.h>
+#include <lootlocker/timezone.h>
 
 #include "test_harness.h"
 
@@ -588,6 +589,79 @@ void TestPlatformNames()
     CHECK(!lootlocker::TryParsePlatform("not_a_platform", parsed));
 }
 
+// A 204 is also gated on the definition's flag. Gating only the empty-body case left a hole:
+// a 204 from an endpoint whose response carries required fields would still become an
+// all-default `Session`.
+void TestNoContentIsNotASuccessForRequiredResponse()
+{
+    std::shared_ptr<NullStateWriter> keep_alive;
+    Fixture f(MakeConfigWithoutPersistence(keep_alive));
+
+    bool      called = false;
+    ErrorCode code   = ErrorCode::None;
+
+    lootlocker::auth::StartGuestSession(*f.client, [&](Result<Session> result) {
+        called = true;
+        if (!result.Ok()) {
+            code = result.Error().code;
+        }
+    });
+
+    f.client->Update();
+    f.transport->Complete(f.transport->Order().front(), 204, "");
+    f.client->Update();
+
+    CHECK(called);
+    CHECK(code == ErrorCode::MalformedResponse);
+    CHECK(!f.client->HasSession());
+}
+
+// The OS timezone is consulted when nothing else supplies one. The first version of the
+// resolver skipped that step, so a normal guest start ignored the machine timezone.
+void TestTimezoneFallsBackToTheSystem()
+{
+    std::shared_ptr<NullStateWriter> keep_alive;
+    Fixture f(MakeConfigWithoutPersistence(keep_alive));
+
+    lootlocker::auth::StartGuestSession(*f.client, [](Result<Session>) {});
+    f.client->Update();
+
+    const IHttpTransport::Request* sent = f.Sent();
+    CHECK(sent != nullptr);
+    if (sent == nullptr) {
+        return;
+    }
+
+    // Whatever the machine's zone is, a timezone is sent and it is an IANA name rather than
+    // empty - which is what "the OS step ran" means.
+    const std::string timezone = FieldFromBody(sent->body, "timezone");
+    CHECK(!timezone.empty());
+    CHECK(timezone.find('/') != std::string::npos || timezone == "UTC");
+}
+
+// An injected provider wins over the OS.
+void TestInjectedProviderWins()
+{
+    std::shared_ptr<NullStateWriter> keep_alive;
+    Config config = MakeConfigWithoutPersistence(keep_alive);
+
+    struct FixedProvider : lootlocker::TimezoneProvider {
+        std::string GetTimezone() override { return "Asia/Tokyo"; }
+    };
+    std::shared_ptr<FixedProvider> provider = std::make_shared<FixedProvider>();
+    config.timezone_provider = provider;
+
+    Fixture f(config);
+    lootlocker::auth::StartGuestSession(*f.client, [](Result<Session>) {});
+    f.client->Update();
+
+    const IHttpTransport::Request* sent = f.Sent();
+    CHECK(sent != nullptr);
+    if (sent != nullptr) {
+        CHECK_EQ(FieldFromBody(sent->body, "timezone"), "Asia/Tokyo");
+    }
+}
+
 // --- the client accessors --------------------------------------------------
 
 void TestSessionAccessors()
@@ -635,7 +709,10 @@ int main()
     TestMissingRequiredFieldIsAnError();
     TestMissingOptionalFieldIsFine();
     TestEmptyBodyIsNotASuccess();
+    TestNoContentIsNotASuccessForRequiredResponse();
     TestWrongTypeMessage();
+    TestTimezoneFallsBackToTheSystem();
+    TestInjectedProviderWins();
     TestGuestIdentifierIsReusedAcrossRestarts();
     TestExplicitIdentifierWinsAndPersists();
     TestNullWriterGeneratesNewIdentifierEachTime();
