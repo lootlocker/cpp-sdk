@@ -30,9 +30,7 @@ Result<Empty> from_json(const JsonValue& j, Session& out)
         !core::ReadOptionalString(j, "player_created_at", out.player_created_at, error) ||
         !core::ReadOptionalBool(j, "seen_before", out.seen_before, error) ||
         !core::ReadOptionalBool(j, "check_grant_notifications", out.check_grant_notifications,
-                                error) ||
-        !core::ReadOptionalBool(j, "check_deactivation_notifications",
-                                out.check_deactivation_notifications, error)) {
+                                error)) {
         return Result<Empty>::Fail(error);
     }
 

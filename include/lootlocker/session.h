@@ -23,19 +23,26 @@ struct Session {
     std::uint64_t player_id = 0;      // uint64 on the wire; see D4
     std::string   player_created_at;
     bool          seen_before = false;
+
+    // Whether the player has new grant information to check. Live: the backend computes it
+    // per session in `CheckNotifications`.
     bool          check_grant_notifications = false;
-    bool          check_deactivation_notifications = false;
+
+    // `check_deactivation_notifications` is deliberately absent. The backend declares it on
+    // `PostSessionResponse` but never populates it - `identity.PlayerSession` has no such
+    // field, so `NewPostSessionResponse` cannot set it and it is always false. Modelling a
+    // field that is always false invites a caller to branch on it.
 };
 
 // `player_id` must stay an unsigned 64-bit integer.
 //
-// **This is R9's documented mitigation, not a guard against someone editing the struct.**
-// The D4 spike showed both candidate parsers are exact by default, so the hazard is not the
-// parser but a `double` field in our own structs - and the failure is silent, because a
-// value above 2^53 loses precision without any error. The assert is what makes adding such
-// a field a compile error rather than a support ticket.
+// **This guards against 2^53 JSON truncation** (D4, R9). The D4 spike showed both candidate
+// parsers are exact by default, so the hazard is not the parser but a `double` field in our
+// own structs - and the failure is silent, because a value above 2^53 loses precision
+// without any error. The assert is what makes adding such a field a compile error rather
+// than a support ticket.
 static_assert(sizeof(Session::player_id) == 8 && !std::is_floating_point<decltype(Session::player_id)>::value,
-              "player_id must be an unsigned 64-bit integer (D4, R9)");
+              "player_id must be an unsigned 64-bit integer to survive 2^53 JSON truncation (D4, R9)");
 
 // Decodes a session response (D27).
 //

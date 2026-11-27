@@ -23,6 +23,12 @@ namespace {
 // every platform, but only on guest is it a client-generated value; on the others the server
 // owns it. Naming the persisted key after the concept rather than the wire field keeps the
 // two from being confused.
+//
+// **This is temporary storage.** The identifier belongs on a per-player object keyed by
+// ULID, which is where it will move once multi-session lands (T14a) - a flat key cannot
+// represent two players in one process. It lives here for now because guest auth is the only
+// thing that persists anything, and inventing the player object before there is a second
+// user of it would be guessing at its shape.
 const char* const kGuestIdentifierKey = "guest_identifier";
 
 // A guest identifier: a UUID-shaped random string.
