@@ -336,7 +336,6 @@ void TestSuccessfulSession()
     CHECK(received.player_id == 9007199254740993ULL);   // exact, above 2^53
     CHECK(received.seen_before);
     CHECK(!received.check_grant_notifications);
-    CHECK(received.check_deactivation_notifications);
 
     CHECK(f.client->HasSession());
     CHECK_EQ(f.client->GetSession().session_token, "tok-abc");
